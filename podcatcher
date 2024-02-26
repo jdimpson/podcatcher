@@ -1,0 +1,2261 @@
+#!/usr/bin/python3 -u
+
+# HEY! OK, this is very bad code because it is a direct translation from a bash script that used 
+# sqlite3 for storage, curl for download, and xmlstarlet to process RSS streams. It worked suprisingly
+# well but became difficult to add workarounds for stupid RSS hosts (like ones that serve everything
+# as "audio.mp3"). I finally ported it to python; now I will slowly clean it up by factoring it into
+# objects so I can get rid of all the global variables. Eventually.
+
+import re
+import os
+import io
+import sys
+import stat
+import time
+import atexit
+import sqlite3
+import requests
+import tempfile
+import traceback
+import threading
+#from stat import S_ISDIR,S_ISCHR,S_ISBLK,S_ISREG,S_ISFIFO,S_ISLNK,S_ISSOCK,S_ISLNK,S_IMODE
+from os import path
+from fcntl import flock,LOCK_EX,LOCK_NB,LOCK_UN
+from shlex import quote
+
+import urllib3
+
+# sudo apt install python3-??
+from PIL import Image
+
+# sudo apt install python-dateutil python3-dateutil
+from dateutil import tz
+import dateutil.parser
+
+# sudo apt install eyed3 python-eyed3 python3-eyed3
+import eyed3
+import eyed3.id3
+# sudo apt install python-mutagen python3-mutagen
+import mutagen
+import mutagen.mp4
+# sudo apt install python-magic python3-magic
+import magic
+
+from basename import basename,me
+from rssstream import RssStreamParser,RssParseException
+#TODO: support <itunes:new-feed-url>https://anchor.fm/s/4df7c52c/podcast/rss</itunes:new_feed_url> per http://www.emptysea.net/tote/podcast1.xml
+#      and <itunes:imagehref="https://f.prxu.org/126/c76dd483-02f2-409e-b9b6-2dc9cfd65e30/images/48f61eab-6f08-4cf2-a890-1f21ce>1_He_Is_Still_Holding_a_Knife_square2.jpg"/> per https://feeds.feedburner.com/WelcomeToNightVale?format=xml
+
+def warn(m):
+	print(m,file=sys.stderr)
+def debug(m,l=0):
+	if DEBUG > l:
+		print(m,file=sys.stderr)
+
+# from https://stackoverflow.com/a/70367814
+barrier = threading.Barrier(2)
+def belay(s=1):
+	'''Block the main thread for s seconds'''
+	while True:
+		barrier.wait()
+		time.sleep(s)
+barthread = threading.Thread(target=belay)
+barthread.daemon = True
+barthread.start()
+
+class BanListException(Exception):
+	pass
+
+UPGRADE_V1_TAGS=True
+INSERT_PODCAST_IMAGE=False
+INSERT_DESCRIPTION=True
+OVERWRITE_ORIG_RELEASE_DATE=True
+USE_REDIRECT_INFO=True
+LOCALTZ=tz.gettz('EST5EDT')
+ME=me()
+MYPID=os.getpid()
+VER=1.0
+HOME=os.environ.get('HOME')
+MYHOME="{}/.{}".format(HOME,ME)
+OUTDIR="{}/podcasts".format(MYHOME)
+#PODDB=":memory:"
+PODDB="{}/{}.sqlite".format(MYHOME,ME)
+NOTHE=True
+DBVER=2
+DEBUG=0
+VERBO=False
+QUIET=False
+CATCHUP=False
+PARANUM=1
+UA = "{}/{}".format(ME,VER)
+#UA = "Mozilla/5.0 (Android 10; Mobile; rv:122.0) Gecko/122.0 Firefox/122.0"
+RTIMEOUTS=(60,60)
+
+conn = sqlite3.connect(PODDB)
+
+TEMPLATE=".{ME}-tmp-{MYPID}".format(ME=ME,MYPID=MYPID)
+tempfile.tmpdir = OUTDIR
+def mymktempfile(num):
+	TMPFILE="{T}-{n}-".format(T=TEMPLATE,n=num)
+	h,f = tempfile.mkstemp(prefix=TMPFILE,dir=OUTDIR, text=False)
+	os.close(h)
+	return f
+
+def guido():
+	conn.close()
+	try:
+		with os.scandir() as di:
+			for i in di:
+				if TEMPLATE in i.name and i.is_file():
+					debug("deleting {}".format(i.name))
+					os.unlink(i.name)
+	except:
+		pass
+	debug(m="{} exiting".format(ME))
+
+def makepoddbV1():
+	debug("Creating databases")
+	with conn:
+		c = conn.cursor()
+		try:
+			c.execute('CREATE TABLE schemaver (version INTEGER UNIQUE);')
+			c.execute("insert into schemaver (version) values (?);", (1,))
+		except sqlite3.IntegrityError as e:
+			debug("schemavar version {} already already exists".format(1),l=2)
+		except sqlite3.OperationalError as e:
+			debug("schemavar table already exists",l=2)
+		try:
+			c.execute('CREATE TABLE podcasts(castid INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,castname TEXT NOT NULL,feedurl TEXT NOT NULL UNIQUE, pcenabled INTEGER NOT NULL DEFAULT 1, lastupdate INTEGER, lastattempt INTEGER, failedattempts INTEGER NOT NULL DEFAULT 0, ID3OVERRIDE INTEGER DEFAULT 0);')
+		except sqlite3.OperationalError as e:
+			debug("podcasts table already exists",l=2)
+		try:
+			c.execute('CREATE TABLE episodes (castid INTEGER NOT NULL, episodeid INTEGER NOT NULL, title TEXT NOT NULL, epurl TEXT NOT NULL, enctype TEXT NOT NULL, status TEXT NOT NULL, eplength INTEGER NOT NULL DEFAULT 0, epfirstattempt INTEGER, eplastattempt INTEGER, epfailedattempts INTEGER NOT NULL DEFAULT 0,UNIQUE(castid, episodeid));')
+		except sqlite3.OperationalError as e:
+			debug("episodes table already exists",l=2)
+		#c.execute('CREATE TABLE episodes (castid INTEGER NOT NULL, episodeid INTEGER NOT NULL, title TEXT NOT NULL, epurl TEXT NOT NULL, enctype TEXT NOT NULL,status TEXT NOT NULL, eplength INTEGER NOT NULL DEFAULT 0, epfirstattempt INTEGER, eplastattempt INTEGER, epfailedattempts INTEGER NOT NULL DEFAULT 0,UNIQUE(castid, epurl),UNIQUE(castid, episodeid));')
+
+def makepoddbV2():
+	# ALTER TABLE episodes ADD epguid TEXT;
+	# UPDATE episodes SET epguid = epurl;
+	# ALTER TABLE podcasts ADD origfeedurl TEXT;
+	# UPDATE podcasts SET origfeedurl = feedurl;
+	# CREATE TABLE episodes2 (castid INTEGER NOT NULL, episodeid INTEGER NOT NULL, title TEXT NOT NULL, epurl TEXT, enctype TEXT , status TEXT NOT NULL, eplength INTEGER DEFAULT 0, epfirstattempt INTEGER, eplastattempt INTEGER, epfailedattempts INTEGER NOT NULL DEFAULT 0,epguid TEXT NOT NULL, UNIQUE(castid, episodeid));
+	# insert into episodes2 select * from episodes ;
+	# drop table episodes;
+	# alter table episodes2 rename to episodes;
+	# ALTER TABLE episodes ADD eppubdate INTEGER;
+	debug("Creating databases")
+	with conn:
+		c = conn.cursor()
+		try:
+			c.execute('CREATE TABLE schemaver (version INTEGER UNIQUE);')
+			c.execute("insert into schemaver (version) values (?);", (2,))
+		except sqlite3.IntegrityError as e:
+			debug("schemavar version {} already already exists".format(2),l=2)
+		except sqlite3.OperationalError as e:
+			debug("schemavar table already exists",l=2)
+		try:
+			c.execute('CREATE TABLE podcasts(castid INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,castname TEXT NOT NULL,feedurl TEXT NOT NULL UNIQUE, origfeedurl TEXT, pcenabled INTEGER NOT NULL DEFAULT 1, lastupdate INTEGER, lastattempt INTEGER, failedattempts INTEGER NOT NULL DEFAULT 0, ID3OVERRIDE INTEGER DEFAULT 0);')
+		except sqlite3.OperationalError as e:
+			debug("podcasts table already exists",l=2)
+		try:
+			c.execute('CREATE TABLE episodes (castid INTEGER NOT NULL, episodeid INTEGER NOT NULL, title TEXT NOT NULL, epurl TEXT, enctype TEXT NOT NULL, status TEXT NOT NULL, eplength INTEGER NOT NULL DEFAULT 0, epfirstattempt INTEGER, eplastattempt INTEGER, epfailedattempts INTEGER NOT NULL DEFAULT 0,epguid TEXT NOT NULL, eppubdate INTEGER, UNIQUE(castid, episodeid));')
+		except sqlite3.OperationalError as e:
+			debug("episodes table already exists",l=2)
+
+def getdbver():
+	try:
+		with conn:
+			c = conn.cursor()
+			c.execute('select * from schemaver;')
+			return c.fetchone()[0]
+	except sqlite3.OperationalError as e:
+		#if "no such table: schemaver" in e.args:
+		#	makepoddbV2()
+		#	return getdbver() # nothing could possibly go wrong
+		#else:
+		return 0
+
+#rssscrub() {
+#	local URL;
+#	URL="$1";   # if ever need to do per podcast scrubbing
+#	cat |\
+#	sed \
+#		-e 's/&\([^;]*\) /\&amp;\1/'\
+#		-e 's/\xC2\xAD/-/g'\
+#		-e 's/\xC2\xB0/ (degrees)/g'\
+#		-e 's/\xC2\xA9/ (copyright)/g'\
+#		-e 's/\xC2\xA0/ /g'\
+#		-e 's/\xC2\x9D//g'\
+#		-e 's/\xC2\xA6/ (broken bar)/g'\
+#		-e 's/\xCE\xA0/ (pi)/g'\
+#		-e 's/\xE2\x80\x93/-/g'\
+#		-e 's/\xE2\x80\x9B//g'\
+#		-e 's/\xE2\x80\x9C/"/g'\
+#		-e 's/\xE2\x80\x9D/"/g'\
+#		-e 's/\xE2\x82\xAC/ (euro)/g';
+#		#-e 's/\xA0//g'\
+#		#-e 's/\xC2//g';
+## see http://www.utf8-chartable.de/ for reference
+#}
+
+def usage():
+	return "Usage: {} [-hdqv] (add <podcastURL> | update | paraupdate [numprocs] | catchup | list | listall | updatecast <podcastURL> | catchupcast <podcastURL> | disable <podcastURL> | enable <podcastURL> | reset <podcastURL> | setddir <podcastdirectory> | checkdir | episodes [castURL] | checklock )".format(ME)
+
+
+#getchanneltitle() {
+#	sed -n -e '1,/(item/p' | sed -n -e '/(image/,/)image/!p' | sed -n -e '/(title/,/)title/p' | grep -v '^[)(]title$' | sed -e 's/^-//' | sed -e ':a;N;$!ba;s/\n//g'
+#}
+
+def isrss (b):
+	o = magic.from_buffer(b)
+	if "XML" in o and "document" in o:
+		debug("data is XML", l=1)
+		return True
+	else:
+		debug("data is not XML according to libmagic", l=1)
+		# fall through
+	# Seems to happen when the opening tag has lots of xmlns attribs
+	# this seems to have priority over XML in the magic file.
+	if "ASCII" in o:
+		debug("data is ASCII, but..", l=1)
+		with open(f,'r') as eff:
+			for line in eff.readlines():
+				if "<rss" in line or "<RSS" in line:
+					debug("data is also RSS", l=1)
+					return True
+		debug("data is not RSS",l=1)
+		# fall through
+	else:
+		debug("data is not ASCII",l=1)
+	return False #XXX: could be more thorough
+
+def isanum(URL):
+	try:
+		int(URL)
+		return True
+	except ValueError as e:
+		return False
+
+def fingerout(URL):
+	isnum = isanum(URL)
+	with conn:
+		c=conn.cursor()
+		if isnum:
+			sql = "select castid,castname,feedurl from podcasts where castid = ?;" 
+			args =(URL,)
+		else:
+			sql = "select castid,castname,feedurl from podcasts where feedurl = ?;" 
+			args =(URL,)
+		c.execute(sql,args)
+		tmp = c.fetchone()
+		if tmp is not None: 
+			ID = tmp[0]
+			NAME = tmp[1]
+			URL = tmp[2]
+		else: 
+			URL = ID = NAME = None
+	return podcast_show(ID,URL,NAME)
+
+def enablepodcast(URL):
+	with conn:
+		c = conn.cursor()
+		show = fingerout(URL)
+		ID, URL = show.castid, show.url
+
+		if ID is None:
+			debug("{} is not in database".format(URL))
+			ID = 0
+		else:
+			c.execute("update podcasts set pcenabled = 1 where feedurl = ?;", (URL,))
+			debug("{} has been enabled".format(URL))
+
+	return ID
+
+def resetpodcast(URL):
+	with conn:
+		c = conn.cursor()
+		show = fingerout(URL)
+		ID, URL = show.castid, show.url
+
+		if ID is None:
+			debug("{} is not in database".format(URL))
+			ID = 0
+		else:
+			c.execute("delete from episodes where castid = ?;", (ID,))
+			debug("{} has been reset".format(URL))
+	return ID
+
+def disablepodcast(URL):
+	with conn:
+		c = conn.cursor()
+		show = fingerout(URL)
+		ID, URL = show.castid, show.url
+
+		if ID is None:
+			debug("{} is not in database".format(URL))
+			ID = 0
+		else:
+			c.execute("update podcasts set pcenabled = 0 where feedurl = ?;", (URL,))
+			debug("{} has been disabled".format(URL))
+
+	return ID
+
+def is_redirect(r):
+	#if r.status_code == 301 or r.status_code == 308:
+	if r.is_permanent_redirect:
+		warn("Warning: permenant redirect was recommended, from {}, to {}".format(r.request.url, r.headers['location']))
+		# could also check r.history, but only if allow_redirects was true
+	#if r.status_code == 301 or r.status_code == 302 or r.status_code == 303 or r.status_code == 307 or r.status_code == 308:
+	if r.is_redirect:
+		return True
+	return False
+
+def curl(URL,TMPFILE=None,allow_redirects=True):
+	barrier.wait()
+	#if 'feedburner' in URL or 'nightvalepresents' in URL or 'songonauts' in URL:
+	#	debug('''slowing down for feedburner''')
+	#	for c in range(20): barrier.wait()
+
+	# silent
+	# compressed
+	# globoff
+	# location
+
+	hd = { 'User-Agent': UA, }
+
+	#try:
+	r = requests.get(URL, headers=hd, stream=True,allow_redirects=allow_redirects,timeout=RTIMEOUTS)
+	#except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as e:
+	#	debug("curl {} received error {} {}; returning None".format(URL,type(e),e))
+	#	return None
+
+	if not allow_redirects and is_redirect(r):
+		debug("curl got {} redirect for {}, but told not to follow redirect to {}".format(r.status_code, URL, r.headers['location']))
+		return r
+
+
+	if TMPFILE is not None:
+		with open(TMPFILE,'wb') as o:
+			try:
+				for chunk in r.iter_content(chunk_size=128):
+					o.write(chunk)
+			except ConnectionResetError as e:
+				warn("Connection reset while reading content from {}".format(URL))
+				return None
+			except urllib3.exceptions.ProtocolError as e:
+				warn("Protocol Error ({}) while reading content from {}".format(e, URL))
+				return None
+			except requests.exceptions.ChunkedEncodingError as e:
+				warn("Chunked Encoding Error ({}) while reading content from {}".format(e, URL))
+				return None
+	return r
+
+def get_channel_title(URL): return get_channel(URL,'/rss/channel/title')
+def get_channel_image(URL): 
+	f = get_channel(URL,'/rss/channel/image/url')
+	if f is None:
+		debug("checking for itunes:image")
+		f = get_channel(URL, '/rss/channel/itunes:image')
+		if f is None:
+			warn("not rss feed image found")
+		if 'href' in f:
+			f = f['href']
+	return f
+
+def get_channel(URL, key):
+	barrier.wait()
+	r = RssStreamParser(URL,ua=UA,timeout=RTIMEOUTS,verb=(DEBUG>1))
+	val  = None
+	attr = None
+	try:
+		for t in r.parse():
+			k,v,a = t
+			if key in k:
+				val = v
+				attr = a
+				break
+	except Exception as e:
+		outcome = handle_requests_error(e,URL)
+		if "retries=" in outcome or outcome == "giveup":
+			#return None
+			pass
+		elif outcome == "proceed":
+			pass
+		elif outcome == "raise":
+			raise e
+
+	if val is not None:
+		return val
+	if attr is not None:
+		return attr
+	debug("no entry for {} found in {}".format(key, URL))
+	return None
+
+def addpodcast(URL):
+	with conn:
+		c = conn.cursor()
+		show = fingerout(URL)
+		ID = show.castid
+
+		if ID is not None:
+			debug("{} was already in database".format(URL))
+			c.execute("select pcenabled from podcasts where feedurl = ?;", (URL,))
+			EN = c.fetchone()
+			if EN == 0:
+				debug("{} is DISABLED".format(URL))
+			return 0
+
+		c.execute("select castid from podcasts where origfeedurl = ?;", (URL,))
+		tmp = c.fetchone()
+		if tmp is not None:
+			debug("{} was already in database (as outdated original feed URL)".format(URL))
+			return 0
+		
+		debug("{} is new, adding to a database".format(URL))
+
+	title = get_channel_title(URL)
+
+	debug("Title of {} is {}".format(URL, title))
+	# sqlescape?
+
+	with conn:
+		c = conn.cursor()
+		c.execute("insert into podcasts (castname,feedurl) values (?,?);", (title, URL))
+		c.execute("select castid from podcasts where feedurl = ?", (URL,))
+		ID = c.fetchone()[0]
+	return ID
+
+def listepisodes(CAST):
+	with conn:
+		c = conn.cursor()
+		SELECTION="eplastattempt, epurl";
+
+		if CAST is None:
+			sql = "select {} from episodes order by castid ASC, episodeid DESC;".format(SELECTION)
+			arg = ()
+		else:
+			show = fingerout(CAST)
+			ID, URL = show.castid, show.url
+
+			sql = "select {} from episodes where castid = ? order by episodeid DESC;".format(SELECTION)
+			arg = (ID,)
+
+		debug("{},{}".format(sql,arg))
+
+		for row in c.execute(sql,arg):
+			print(row)
+
+def getpodcasts(CAST=None,ALL=False):
+	if not ALL:
+		debug("Checking enabled casts",l=1)
+		ENA="pcenabled = 1"
+	else:
+		debug("Checking all casts",l=1)
+		ENA="1 = 1"
+
+	o = []
+	with conn:
+		c = conn.cursor()
+		if CAST is not None:
+			show = fingerout(CAST)
+			ID, CAST = show.castid, show.url
+			sql = "select castid, feedurl, castname from podcasts where feedurl = ? and {};".format(ENA)
+			arg=(CAST,)
+			debug("Getting cast {}".format(CAST))
+		else:
+			sql = "select castid, feedurl, castname from podcasts where {};".format(ENA)
+			arg=()
+
+		debug(sql,l=1)
+		o = c.execute(sql,arg)
+	o = [ podcast_show(*x) for x in o ]
+	return o
+
+def listcasts(LISTALL):
+	for podshow in getpodcasts(ALL=LISTALL):
+		print(podshow.castid,podshow.url,podshow.castname)
+
+
+def seen(show,ep):
+	numseen = None
+	SQL="select count(*) from episodes where castid = ? and epguid = ? and status = 'Downloaded';"
+	args = (show.castid, ep.guid,)
+	debug("seen SQL: {}({})".format(SQL,args),l=1)
+	with conn:
+		c = conn.cursor()
+		c.execute(SQL,args)
+		numseen = c.fetchone()[0]
+	if numseen is None:
+		warn("DB error: numseen is empty: {}".format(SQL))
+		exit(7)
+	if numseen > 0:
+		#print("seen",show.castid,ep.guid)
+		return True
+	#if oldseen(show.castid,ep):
+	#	print("oldseen",show.castid,ep.guid)
+	#	return True
+	#print("unseen",show.castid,ep.guid)
+	return False
+
+def oldseen(ID,ep):
+	numseen = None
+	if ep.url is None or ep.url == '':
+		SQL="select count(*) from episodes where castid = ? and epurl is null and status = 'Downloaded';"
+		args = (ID,)
+	else:
+		SQL="select count(*) from episodes where castid = ? and epurl = ? and status = 'Downloaded';"
+		args = (ID, ep.url,)
+	debug("seen SQL: {}({})".format(SQL,args),l=1)
+	with conn:
+		c = conn.cursor()
+		c.execute(SQL,args)
+		numseen = c.fetchone()[0]
+	if numseen is None:
+		warn("DB error: numseen is empty: {}".format(SQL))
+		exit(7)
+	if numseen > 0:
+		SQL="update episodes set epguid = ? where castid = ? and epurl = ? and status = 'Downloaded';"
+		args = (ep.guid, ID, ep.url,)
+		with conn:
+			c = conn.cursor()
+			c.execute(SQL,args)
+		return True
+	return False
+
+
+def title2filename (TITLE):
+	# sed -e 's/\xA0//g' -e "s/'//g" -e 's/://g' -e 's/\!//g' -e 's/\///'
+	removes = [ u"\u00A0", "'", ":", "!", "/", ]
+	# sed -e "s/\xC2\xBB/-/g" 
+	todash  = [ u"\uC2BB", ]
+	for r in removes:
+		TITLE=TITLE.replace(r,"")
+	for d in todash:
+		TITLE=TITLE.replace(d,"-")
+
+	# sed -e 's/\?.*$//'
+	# remove question marks and everything after them
+	if "?" in TITLE:
+		TITLE=TITLE[:TITLE.find("?")+1]
+
+	# sed -e 's/^-//' -e 's/^ *//' 
+	leads = ["-", " ",]
+	for l in leads:
+		while TITLE[0] == l:
+			TITLE=TITLE[1:]
+	# sed -e 's/ *$//' 
+	ends = [ " ", ]
+	for e in ends:
+		while TITLE[-1] == e:
+			TITLE=TITLE[:-1]
+
+	return TITLE
+
+
+def url2filename (URL,TITLE, preredirname=None):
+	# we use the pre-redirection name if the post-redirection name is dumb. Presumably the preredirname has already been through this process.
+	# sed -e 's/\xA0//g' -e "s/'//g" -e "s/%20/ /g" -e 's/\?.*$//' -e 's/&amp;/\&/' -e 's/[":]//g' -e "s/'//g" -e 's/\!//'`;
+	fil = re.sub('\?.*$', '', URL)
+	fil=basename(fil)
+
+	f = re.sub(r'\.[^.]+$','',fil)
+	e = re.sub(r'^.*\.(.+?)$', r'\1', fil)
+	if re.search(r'^[0-9abcdef-]*$',f):
+		if preredirname is not None:
+			new = preredirname
+		else:
+			new = "{}.{}".format(title2filename(TITLE),e)
+		debug('''File name "{}" is stupid hash/uuid, using {} instead'''.format(fil, new))
+		fil = new
+	elif re.search(r'^media\.mp3$',fil) or re.search(r'^audio\.mp3$',fil) or re.search(r'^default_tc\.mp3$',fil) or re.search(r'^default\.mp3',fil) or re.search(r'^published\.mp3$',fil) or re.search(r'^stream\.mp3$',fil):
+		if preredirname is not None:
+			new = preredirname
+		else:
+			new = "{}.{}".format(title2filename(TITLE),e)
+		debug('''File name "{}" is generic, using {} instead'''.format(fil, new))
+		fil = new
+	elif re.search(r'^[0-9a-z]{28}$', fil):
+		if preredirname is not None:
+			new = preredirname
+		else:
+			# XXX: really need to rewrite all this code so needed info is available in an object
+			e="mp3"
+			new = "{}.{}".format(title2filename(TITLE),e)
+		debug('''File name "{}" is insipid, using {} instead'''.format(fil, new))
+		fil = new
+
+	fil=fil.replace('\n','')
+	fil=fil.replace('\t','')
+	removes= '''[\u00A0'"!:]'''
+	fil = re.sub(removes,'',fil)
+
+	return fil
+
+def urldecode (inURL):
+	s = 0
+	while True:
+		p = inURL.find('%',s)
+		if p == -1:
+			break
+		asc = inURL[p+1:p+3]
+		b = bytes.fromhex(asc).decode('utf-8')
+		inURL = re.sub('%{}'.format(asc), b,inURL)
+		s=p+2
+	inURL = re.sub('&amp;', '&', inURL)
+	return inURL
+
+#print(urldecode('%20oh%20hello%20there%21'))
+#exit(0)
+#print(url2filename('''http://foo.com/b'"!:%20&amp;foo.mp3?foo=bar''', 'TITLE'))
+#print(url2filename('''http://foo.com/a7f8c85ae67f.mp3''', 'TITLE'))
+#print(url2filename('''http://foo.com/media.mp3''', 'TITLE'))
+#print(url2filename('''http://foo.com/audio.mp3''', 'TITLE'))
+#print(url2filename('''http://foo.com/default_tc.mp3''', 'TITLE'))
+#exit(0)
+
+
+def sqlescape (STR):
+	pass
+#	local STR;
+#	STR="$1";
+#	echo "$STR" | sed -e "s/'/''/g" -e 's/|//g'
+#}
+
+def markdownloaded (show,ep):
+
+	status="Downloaded"
+	maxid=None
+	sql="SELECT MAX(episodeid) FROM episodes WHERE castid = ?;"
+	args=(show.castid,)
+	with conn:
+		c=conn.cursor()
+		c.execute(sql,args)
+		maxid = c.fetchone()[0]
+	if maxid is None:
+		maxid = 0
+	nextid=maxid+1
+	sql = "insert INTO episodes (castid, episodeid, title,epurl, enctype, status, eplength, epfirstattempt, eplastattempt, epguid, eppubdate) values (?,?,?,?,?,?,?,datetime(),datetime(),?, ?);"
+	args=(show.castid,nextid,ep.title,ep.url,ep.type,status,ep.length,ep.guid,ep.pubdate)
+	debug("{},{}".format(sql,args),l=1)
+	with conn:
+		c=conn.cursor()
+		c.execute(sql,args)
+
+
+
+# don't need this no more!
+#def id3override (ID,CAST):
+#	pass
+
+def updateid3(podfile):
+	FILE,ID,CAST,EPISODE,DATE,TYPE, DESCR, URL, RSSURL, ovr = \
+	podfile.file,podfile.podcast_show.castid,podfile.podcast_show.castname,podfile.podcast_episode.title,podfile.podcast_episode.pubdate,podfile.podcast_episode.type,podfile.podcast_episode.description,podfile.podcast_episode.url,podfile.podcast_show.url,podfile.podcast_show.getid3policy()
+	debug("ID3 input: FILE={} ID={} CAST={} EPISODE={} DATE={} TYPE={}".format(FILE, ID, CAST, EPISODE, DATE, TYPE),l=2)
+	debug("ID3 override is {}".format(podfile.podcast_show.getid3policy()))
+	if  TYPE.lower() == "audio/mpeg" or TYPE.lower() == "audio/mp3":
+		debug("{} is type {}, handling".format(FILE,TYPE))
+		return updateid3_mp3(podfile)
+	elif TYPE.lower() == "audio/mp4" or TYPE.lower() == "audio/x-m4a":
+		debug("{} is type {}, handling".format(FILE,TYPE))
+		return updateid3_mp4(podfile)
+	elif TYPE.lower() == "audio/wav" or TYPE.lower() == "audio/x-wav":
+		warn("{} is type {}, half-assing it".format(FILE,TYPE))
+		return updateid3_encodewav(podfile)
+	else:
+		warn("{} is type {}, can't handle it, so not checking ID3 info".format(FILE,TYPE))
+		#debug("{} is type {}, can't handle it, so not checking ID3 info".format(FILE,TYPE))
+		return updateid3_save(podfile)
+
+def updateid3_mp4(podfile):
+	FILE,ID,CAST,EPISODE,DATE,TYPE, DESCR, URL, RSSURL, ovr = \
+	podfile.file,podfile.podcast_show.castid,podfile.podcast_show.castname,podfile.podcast_episode.title,podfile.podcast_episode.pubdate,podfile.podcast_episode.type,podfile.podcast_episode.description,podfile.podcast_episode.url,podfile.podcast_show.url,podfile.podcast_show.getid3policy()
+	audiofile = mutagen.File(FILE)
+	tag = audiofile.tags
+	# https://mutagen.readthedocs.io/en/latest/api/mp4.html
+
+	if tag is None:
+		debug("No MP4 ID3 tags found; creating them!")
+		audiofile.tags = mutagen.mp4.MP4Tags()
+		tag = audiofile.tags
+
+	# could set explicit content in rtng metadata atom. Most GUIs expose it as ITUNEADVISORY
+
+	albumstr = b'\xc2\xa9alb'.decode('utf-8')
+	if albumstr not in tag or tag[albumstr] is None or ovr:
+		tag[albumstr] = [CAST]
+		debug("Set Album to {}".format(CAST))
+
+	titlestr = b'\xc2\xa9nam'.decode('utf-8')
+	if titlestr not in tag or tag[titlestr] is None or ovr:
+		tag[titlestr] = [EPISODE]
+		debug("Set Title to {}".format(EPISODE))
+
+	datestr = b'\xc2\xa9day'.decode('utf-8')
+	if OVERWRITE_ORIG_RELEASE_DATE or datestr not in tag or tag[datestr] is None or ovr:
+		tag[datestr] = [DATE.replace(tzinfo=None).replace(microsecond=0).isoformat()]
+		debug("Set Date/Year to {}".format(str(tag[datestr])))
+
+	if DESCR is not None:
+		if   "desc" not in tag or tag["desc"] is None:
+			tag["desc"] = [DESCR]
+			debug("Set Description to {}".format(DESCR))
+		elif isinstance(tag["desc"], list) and INSERT_DESCRIPTION or ovr:
+			tag["desc"].append(DESCR)
+			debug("Added Description to {}".format(DESCR))
+
+	if INSERT_PODCAST_IMAGE or "covr" not in tag or tag["covr"] is None or len(tag["covr"]) <= 0:
+		debug("Need or want cover art")
+		imgurl = get_channel_image(RSSURL)
+		mp4covr=None
+		if imgurl is not None:
+			r=curl(imgurl)
+			if r.status_code != 200:
+				warn("Download of image url {} had failure code {}".format(imgurl,r.status_code))
+			elif r.content is None or r.content == b'':
+				warn("Download of image url {} yielded no content".format(imgurl))
+			else:
+				#try:
+				typ=mutagen.mp4.AtomDataType.JPEG
+				if   "image/jpeg" in r.headers['Content-Type'].lower():
+					typ=mutagen.mp4.AtomDataType.JPEG
+				elif "image/png"  in r.headers['Content-Type'].lower():
+					typ=mutagen.mp4.AtomDataType.JPEG
+				mp4covr =  mutagen.mp4.MP4Cover(r.content,typ)
+				debug("Download of image url {} succeed. {} {}".format(imgurl,r.headers['Content-Type'], typ))
+		else:
+			debug("No cover art found in {}".format(RSSURL))
+		if mp4covr is not None:
+			if 'covr' not in tag or tag['covr'] is None:
+				tag['covr'] = []
+			tag['covr'].append(mp4covr)
+			debug("Cover art added. {} images total".format(len(tag['covr'])))
+		else:
+			debug("No new Cover art added. {} images total".format(len(tag['covr'])))
+
+	#if tag.audio_file_url is None or ovr:
+	#	tag.audio_file_url = URL.encode('utf-8')
+	#	debug("Set audio_file_url to {}".format(URL))
+
+	if 'purl' not in tag or tag['purl'] is None or ovr:
+		tag['purl'] = [RSSURL]
+		debug("Set purl (audio_source_url) to {}".format(RSSURL))
+
+	audiofile.save()
+
+def updateid3_encodewav(podfile):
+	ovr = podfile.podcast_show.getid3policy()
+	from shlex import quote
+	shell_file = re.sub(r'\.[^.]+$','',podfile.file) + ".sh"
+	warn("Writing wav encoder and id3 insertion shell script to {}".format(shell_file))
+	tmp = basename(podfile.file)
+	scr = encid3scr(podfile, wavfile=quote(tmp), mp3file=quote(re.sub(r'\.[^.]+$','',tmp) + ".mp3"))
+	with open(shell_file,"w") as f:
+		f.write(scr)
+
+def encid3scr(podfile, wavfile=None, mp3file=None, lameopts=None):
+	from shlex import quote
+	fmtargs = {}
+	if mp3file is None:
+		fmtargs['mp3_file'] = quote(basename(podfile.file))
+	else:
+		fmtargs['mp3_file'] = mp3file
+	if wavfile is None:
+		fmtargs['wav_file'] = ''
+	else:
+		fmtargs['wav_file'] = wavfile
+	if lameopts is None:
+		fmtargs['lameopts'] = '' 
+	else:
+		#do your own shell protection plz
+		fmtargs['lameopts'] = lameopts
+	fmtargs['album'] = quote(podfile.podcast_show.castname)
+	#fmtargs['date'] = quote(podfile.podcast_episode.pubdate.replace(tzinfo=None).replace(microsecond=0).isoformat())
+	fmtargs['date'] = quote(podfile.podcast_episode.pubdate.replace(microsecond=0).isoformat())
+	fmtargs['description'] = quote(podfile.podcast_episode.description)
+	fmtargs['description'] = fmtargs['description'].replace(':','\:')
+	fmtargs['episodeurl'] = quote(podfile.podcast_episode.url)
+	fmtargs['feedurl'] = quote(podfile.podcast_show.url)
+	fmtargs['title'] = quote(podfile.podcast_episode.title)
+	fmtargs['imageurl'] = quote(get_channel_image(podfile.podcast_show.url))
+	return '''#!/bin/sh
+if ! test -z "{wav_file}"; then
+	lame {lameopts} {wav_file} {mp3_file} || exit 1;
+fi
+eyeD3 --preserve-file-time -A {album} {mp3_file};
+eyeD3 --preserve-file-time -t {title} {mp3_file};
+eyeD3 --preserve-file-time --orig-release-date {date} {mp3_file};
+eyeD3 --preserve-file-time --add-comment {description}:RSS {mp3_file};
+eyeD3 --preserve-file-time --url-frame WOAF:{episodeurl} {mp3_file};
+eyeD3 --preserve-file-time --url-frame WOAS:{feedurl} {mp3_file};
+if curl {imageurl} > img.tmp; then
+	eyeD3 --preserve-file-time --add-image img.tmp:OTHER {mp3_file};
+	rm img.tmp;
+fi
+TIME=`date --date={date} +%Y%m%d%H%M` || exit 2;
+touch -t $TIME {mp3_file};
+exit 0;
+'''.format(**fmtargs)
+
+def updateid3_save(podfile):
+	txt_file = re.sub(r'\.[^.]+$','',podfile.file) + ".txt"
+	warn("Writing id3 text info to {}".format(txt_file))
+	IMAGEURL = get_channel_image(podfile.podcast_show.url)
+	txt ='''File {FILE}
+ID {ID}
+CAST/ALBUM {CAST}
+EPISODE {EPISODE}
+DATE {DATE}
+TYPE {TYPE}
+DESCR {DESCR}
+URL {URL}
+RSSURL {RSSURL}
+IMAGEURL {IMAGEURL}
+'''.format(FILE=podfile.file, ID=podfile.podcast_show.castid, CAST=podfile.podcast_show.castname, EPISODE=podfile.podcast_episode.title, DATE=podfile.podcast_episode.pubdate, TYPE=podfile.podcast_episode.type, DESCR=podfile.podcast_episode.description, URL=podfile.podcast_episode.url, RSSURL=podfile.podcast_show.url, IMAGEURL=IMAGEURL)
+	with open(txt_file,"w") as f:
+		f.write(txt)
+
+	shell_file = re.sub(r'\.[^.]+$','',podfile.file) + ".sh"
+	warn("Writing id3 script to {}".format(shell_file))
+	scr = encid3scr(podfile)
+	with open(shell_file,"w") as f:
+		f.write(scr)
+
+# really should monitor the size of this
+geturlimg_cache = {}
+def geturlimg(imgurl):
+	content, content_type = geturlimg_cache.get(imgurl, (None,None))
+	if content is not None:
+		debug("Cache hit for image {}".format(imgurl))
+		return content, content_type
+	
+	r=curl(imgurl)
+	content = None
+	content_type = None
+	if r.status_code != 200:
+		warn("Download of image url {} had failure code {}".format(imgurl,r.status_code))
+	elif r.content is None or r.content == b'':
+		warn("Download of image url {} yielded no content".format(imgurl))
+	else:
+		content = r.content
+
+	try:
+		content_type = r.headers['content-type']
+	except KeyError as e:
+		if 'content-disposition' in r.headers and "attachment" in  r.headers["content-disposition"] and ( 'jpeg' in r.headers["content-disposition"] or 'jpg' in r.headers["content-disposition"] ):
+			content_type = "image/jpeg"
+		else:
+			warn("couldnt figure out content type of downloaded img; no content-type, and content-dispostion ({}) not helpful".format(r.headers['content-disposition']))
+
+	geturlimg_cache[imgurl] = (content, content_type)
+	return content, content_type
+
+def checkimgres(imgbuf, maxres, resizeres=None, FORCEJPEG=False):
+	content = None
+	try:
+		from PIL import Image
+		import io
+		if 'PIL' not in str(type(imgbuf)): # why can't I used isinstance()?
+			imgob = Image.open(io.BytesIO(imgbuf))
+		else:
+			imgob = imgbuf
+		t=str(imgob.format)
+		f=t
+		if FORCEJPEG: f="JPEG"
+		if imgob.size[0] > maxres[0] or imgob.size[1] > maxres[1]:
+			debug("resizing {} image to {}".format(t,f))
+			imgob2 = imgob.resize(resizeres)
+			imgob = imgob2
+		content = io.BytesIO()
+		imgob.save(content,format=f)
+		content = content.getvalue()
+	except Exception as e:
+		warn("Error manipulating image ({})".format(str(e)))
+		content = imgbuf
+	return content
+
+def updateid3_mp3(podfile,maxres=(15000,15000),resizeres=(5000,5000)):
+	ID,CAST,EPISODE,DATE,TYPE, DESCR, URL, RSSURL, ovr = \
+	podfile.podcast_show.castid,podfile.podcast_show.castname,podfile.podcast_episode.title,podfile.podcast_episode.pubdate,podfile.podcast_episode.type,podfile.podcast_episode.description,podfile.podcast_episode.url,podfile.podcast_show.url,podfile.podcast_show.getid3policy()
+
+	# so I really like eyeD3 command line tool, as it seems to be maintained whereas all the tools I've used in the
+	# past have not (preemptive RIP to eyeD3 if my luck holds true). eyeD3 is written in Python so it should
+	# be easy to use its module here, right? *sigh*
+
+	audiofile = eyed3.load(podfile.file)
+	try:
+		tag = audiofile.tag
+	except AttributeError as e:
+		tag = None
+
+	if tag is None:
+		debug("No ID3 tags found; creating them!")
+		try:
+			audiofile.tag = eyed3.id3.tag.Tag()
+		except AttributeError as e:
+			if "'NoneType' object has no attribute 'tag'" in str(e):
+				warn('''
+File {} can't be parsed by eyeD3
+'''.format(podfile.file))
+				return updateid3_save(podfile)
+			else : raise(e)
+		tag=audiofile.tag
+
+	if UPGRADE_V1_TAGS and tag.version[0] == eyed3.id3.ID3_V1[0]:
+		warn('''{} has ID3v1.x {} tag, upgrading to ID3v2.4 {}'''.format(podfile.file,tag.version,eyed3.id3.ID3_V2_4))
+		tag.save(preserve_file_time=True, version=eyed3.id3.ID3_V2_4)
+		warn('''tag is now {}'''.format(tag.version))
+
+	if tag.album is None or ovr:
+		tag.album = CAST
+		debug("Set Album to {}".format(CAST))
+
+	if tag.title is None or ovr:
+		tag.title = EPISODE
+		debug("Set Title to {}".format(EPISODE))
+
+	if podfile.podcast_episode.link is not None:
+		tag.user_url_frames.set(podfile.podcast_episode.link.encode(), "link")
+		debug("Set user URL 'link' to {}".format(podfile.podcast_episode.link))
+
+	#if tag.getBestDate() is None or ovr:
+	if OVERWRITE_ORIG_RELEASE_DATE or tag.original_release_date is None or ovr:
+		tag.original_release_date = eyed3.core.Date.parse(DATE.replace(tzinfo=None).replace(microsecond=0).isoformat())
+		debug("Set Date/Year to {}".format(str(tag.original_release_date)))
+
+	if DESCR is not None and INSERT_DESCRIPTION or tag.comments is None or ovr:
+		tag.comments.set(DESCR, description="RSS")
+		debug("Set Comments to {}".format(DESCR))
+
+	if len(tag.images) > 0:
+		debug("already has {} images".format(len(tag.images)))
+		remove = []
+		for tagimg in tag.images:
+			if tagimg.mime_type == 'image/':
+				# friend and folly network's podcast system creates busted embedded images, as of early 2023
+				debug("busted tag image mimetype: {}".format(tagimg.mime_type))
+				remove.append(tagimg.description)
+				# download urlimg
+				# add urlimg to tag (after resizing if needed)
+		for desc in remove:
+			if tag.images.remove(desc):
+				debug('''Removing busted image with description "{}"'''.format(desc))
+			else:
+				warn('''ERROR trying to remove busted image with description "{}"'''.format(desc))
+			
+
+	# OK now I want to archive image urls as image references, regardless of whether the file already has an embedded image or not. 
+	# this is because RSS feeds increasingly use <itunes:image> links rather than embedded image, and I want to easily be able to 
+	# recover the image url (in a standardized way) so I can recreate RSS item entries with images in other software.
+	imgurl = podfile.podcast_episode.itunes_image
+	if imgurl is None:
+		debug("Using podcast channel image")
+		# need to redesign everything so that channel information is available in podcast_show object
+		imgurl = get_channel_image(RSSURL)
+	else:
+		debug("Using episode specific image")
+
+	if INSERT_PODCAST_IMAGE or len(tag.images) <= 0 or ovr:
+		debug("Needs embedded cover art")
+
+		if imgurl is not None:
+			try:
+				content, content_type = geturlimg(imgurl)
+			except requests.exceptions.MissingSchema as e:
+				warn("Error downloading rss feed img url {}: {}".format(imgurl, e))
+				content = None
+			if content:
+				content = checkimgres(content,maxres,resizeres)
+				tag.images.set(eyed3.id3.frames.ImageFrame.OTHER,content,content_type,description=imgurl)
+				debug("Set OTHER image ({}) to {} for {}".format(content_type, imgurl,podfile.file))
+		else:
+			warn("Failed to find rss feed image url for {}, {}".format(RSSURL, podfile.file))
+
+	if imgurl is not None:
+		debug("Setting image pointer as additional image")
+		tag.images.set(eyed3.id3.frames.ImageFrame.OTHER,None,None,description='RSS link',img_url=imgurl)
+
+	# my preferred android podcatcher, podcastaddict, doesn't seem to like embedded images that are too big. 100KBytes seems good, although it might allow bigger; experimenting to figure out the number is frustrating.
+	# or maybe it's the resolution size. 1400x1400 seems too big, even if the byte size is smaller than 100KBytes.
+	for tagimg in tag.images:
+		if tagimg.mime_type == eyed3.id3.frames.ImageFrame.URL_MIME_TYPE_STR:
+			debug("Skipping img_url") # {}".format(dir(tagimg)))
+			#continue <-- why didn't this work?
+		else:
+			try:
+				from PIL import Image
+				import io
+				imgob = Image.open(io.BytesIO(tagimg.image_data))
+				debug("type {0}, {1} bytes, {2[0]}x{2[1]} pix".format(tagimg.mime_type,len(tagimg.image_data),imgob.size))
+				if imgob.size[0] > maxres[0] or imgob.size[1] > maxres[1]:
+					forcejpeg = False
+					warn("overlarge image {0[0]}x{0[0]},resizing".format(imgob.size))
+					content = checkimgres(imgob, maxres, resizeres, FORCEJPEG=forcejpeg)
+					mt = tagimg.mime_type
+					if forcejpeg: 
+						debug("Converting image format to be image/jpeg (was mt)")
+						mt = "image/jpeg"
+					tag.images.set(tagimg.picture_type, content, mt, description=tagimg.description)
+
+			
+			except OSError as e:
+				debug("{}, {} bytes".format(tagimg.mime_type,len(tagimg.image_data)))
+				warn("Error getting image metadata ({} {})".format(repr(e), str(e)))
+
+	if tag.audio_file_url is None or ovr:
+		tag.audio_file_url = URL.encode('utf-8')
+		debug("Set audio_file_url to {}".format(URL))
+
+	if tag.audio_source_url is None or ovr:
+		tag.audio_source_url = RSSURL.encode('utf-8')
+		debug("Set audio_source_url to {}".format(RSSURL))
+
+	try:
+		tag.save(preserve_file_time=True)
+	except NotImplementedError as e:
+		warn("{} has ID3v2.2 tag which cannot be written by this software, converting to ID3v2.4".format(podfile.file))
+		tag.save(preserve_file_time=True, version=eyed3.id3.ID3_V2_4)
+	except eyed3.id3.tag.TagException as e:
+		# Unable to covert the following frames to version v2.3: GRP1
+		if "Unable to covert the following frames" in str(e) or "Unable to convert the following frames" in str(e):
+			warn(list(tag.frame_set))
+			g = str(e)[str(e).find(':')+2:].split(", ")
+			for fid in g:
+				warn('''"{}" has a bad frame "{}", deleting it'''.format(podfile.file,fid))
+				fid=fid.encode('ascii')
+				del tag.frame_set[fid]
+			tag.save(preserve_file_time=True)
+		else:
+			warn('''"{}" having a bad time'''.format(podfile.file))
+			raise e
+
+# don't need this no more!
+#def needsid3tag(TAG,FILE):
+#	pass
+
+def display_item_text(url,date,title,description):
+	print("item from {}".format(url))
+	print("date {}\ntitle {}\ndescription {}".format(date,title,description))
+
+# I don't care what you think about this; every library wants to wrap standard IO errors in their own exception type, which prevents easy creation of human readable error messags. 
+# standard i/o errors are standard for a reason, and should not be wrapped
+def handle_requests_error(e, URL, retries=3, othercontext=None):
+	'''returns strings giveup, proceed, raise, or retries=integer. giveup means return an error, proceed means success or ignorable failure, and retries=integer means a retry is suggested; pass the integer value back in as retries value and it will be count it down to zero and then return giveup'''
+	if isinstance(othercontext, podcast_show):
+		carp = othercontext.carp()
+		if DEBUG:
+			carp = True
+	else:
+		carp = True
+	#requests.Timeout, requests.HTTPError
+	if isinstance(e, requests.exceptions.ReadTimeout):
+		if "Connection to " in str(e) and " timed out" in str(e):
+			if carp: warn ("timed out while connecting to {}".format(URL))
+		elif "ConnectionPool" in str(e) and "Read timed out" in str(e):
+			if carp: warn ("timed out while reading {}".format(URL))
+		else:
+			if carp: warn('''Unrecognized Read timeout on {URL}: {e}'''.format(URL=URL, e=e))
+			retries = 0
+		if retries == 0:
+			return "giveup"
+		else:
+			r='retries={}'.format(retries-1)
+			if carp: warn(r)
+			return r
+	elif isinstance(e, requests.ConnectionError):
+		if   "Read timed out" in str(e) or "Connection to " in str(e) and " timed out" in str(e):
+			if carp: warn ("timed out while connecting to {}".format(URL))
+		elif "Temporary failure in name resolution" in str(e):
+			if carp: warn("dns failure while connecting to {}".format(URL))
+		elif "ConnectionResetError" in str(e):
+			if carp: warn ("Connection reset while connecting to {}".format(URL))
+		elif "Transport endpoint is not connected" in str(e):
+			if carp: warn ("Transport endpoint is not connected while connecting to {}".format(URL))
+			# This is a weird one that's only happened once. Only cause I've found is badly written code that tries to use a server socket to read following a sock.accept() (rather than the resulting client socket). Must be a race condition when a shutdown/RST from the server occurs at a specific point during client socket creation. Hopefully transient and thus worth retrying.
+		elif "SSL: CERTIFICATE_VERIFY_FAILED" in str(e):
+			if carp: warn('''Certificate has expired for {}'''.format(URL))
+			retries = 0
+		elif " doesn't match " in str(e):
+			if carp: warn('''Certificate vs DNS hostname error for RSS {}'''.format(URL))
+			retries = 0
+		elif "No address associated with hostname" in str(e):
+			if carp: warn('''No address associated with hostname in {URL}'''.format(URL=URL))
+			retries=0
+		elif "No route to host" in str(e):
+			if carp: warn('''No route to host in {URL}'''.format(URL=URL))
+		elif "[Errno 111] Connection refused" in str(e): # once saw this wrapped in an HTTPPool max tries exceeded error.
+			if carp: warn('''Connection refused by {URL}'''.format(URL=URL))
+		else:
+			if carp: warn('''Unrecognized ConnectionError on {URL}: {e}'''.format(URL=URL, e=e))
+			retries = 0
+		if retries == 0:
+			return "giveup"
+		else:
+			r='retries={}'.format(retries-1)
+			if carp: warn(r)
+			return r
+	elif isinstance(e,requests.exceptions.ChunkedEncodingError):
+		if "ConnectionResetError" in str(e):
+			if carp: warn("Connection broken by peer {}".format(URL))
+		else:
+			if carp: warn('''Unrecognized ChunkedEncodingError on {URL}: {e}'''.format(URL=URL, e=e))
+		return "giveup"
+	elif isinstance(e,requests.exceptions.MissingSchema):
+		if "No schema supplied" in str(e):
+			if carp: warn('''malformed URL "{}"'''.format(URL))
+			return "giveup"
+		return "raise"
+	elif isinstance(e,requests.exceptions.ConnectTimeout):
+		if carp: warn("Connection timed out to {}".format(URL))
+		if retries == 0:
+			return "giveup"
+		else:
+			r='retries={}'.format(retries-1)
+			if carp: warn(r)
+			return r
+	elif isinstance(e, BanListException):
+		if carp: warn("Host in URL {} is on the banned list!".format(URL))
+		return "giveup"
+	else:
+		# got KeyError trying to access the content-type of a response once
+		return "raise"
+
+# This is a podcast channel or feed, intended to mirror records in the podcasts database table
+class podcast_show(object):
+	def __init__(self,castid, url, castname):
+		self.castid   = castid
+		self.url      = url
+		self.castname = castname
+
+	def getid3policy(self):
+		with conn:
+			c=conn.cursor()
+			c.execute("select ID3OVERRIDE from podcasts where CASTID = ?",(self.castid,))
+			v = c.fetchone()[0]
+		if v == 0:
+			return False
+		return True
+
+	def failedattempts(self):
+		failedattempts = None
+		sql = "select failedattempts from podcasts where castid = ?"
+		args=(self.castid,)
+		with conn:
+			c=conn.cursor()
+			c.execute(sql,args)
+			failedattempts = c.fetchone()[0]
+		return int(failedattempts)
+	def carp(self):
+		fa = self.failedattempts()
+		if fa <= 10:
+			return True
+		if fa < 100 and (fa % 10) == 0:
+			return True
+		if fa < 1000 and (fa % 100) == 0:
+			return True
+		if (fa % 1000) == 0:
+			return True
+		return False
+	def mark_attempt(self, success=True):
+		if success:
+			sql = "update podcasts set lastattempt = datetime(), lastupdate = datetime(), failedattempts = 0 where castid = ?"
+		else:
+			sql = "update podcasts set lastattempt = datetime(), failedattempts = failedattempts + 1 where castid = ?"
+		args=(self.castid,)
+		debug("{},{}".format(sql,args),l=1)
+		with conn:
+			c=conn.cursor()
+			c.execute(sql,args)
+
+	# XXX: podcast_show should be able to hold all the RSS metadata
+	#self.title = i['title']
+	#self.link = i['link']
+	#self.pubDate = i['pubDate']
+	#self.lastBuildDate = i['lastBuildDate']
+	#self.ttl = i['ttl']
+	#self.language = i['language']
+	#self.copyright = i['copyright']
+	#self.webMaster = i['webMaster']
+	#self.description = i['description']
+	#self.managingEditor = i['managingEditor']
+	#self.generator = i['generator']
+	#self.docs = i['docs']
+	#self.image_url = i['image']['url']
+	#self.image_title = i['image']['title']
+	#self.image_link = i['image']['link']
+	#self.image_width = i['image']['width']
+	#self.image_height = i['image']['height']
+	#self.image_description = i['image']['description']
+	#self.itunes_image = i['itunes:image']
+	#self.itunes_author = i['itunes:author']
+	#self.itunes_type = i['itunes:type']
+	#self.itunes_explicit = i['itunes:explicit']
+	#self.itunes_subtitle = i['itunes:subtitle']
+	#self.itunes_summary = i['itunes:summary']
+	#self.itunes_keywords = i['itunes:keywords']
+	#self.itunes_category = i['itunes:category']
+	#self.itunes_email = i['itunes:email']['itunes:email']
+	#self.itunes_name = i['itunes:owner']['itunes:name']
+
+# from https://gist.github.com/h-j-13/e3a585796510b59601e34a07e99b386d
+whois_timezone_info = {
+        "A":     int(1 * 3600),
+        "ACDT":  int(10.5 * 3600),
+        "ACST":  int(9.5 * 3600),
+        "ACT":   int(-5 * 3600),
+        "ACWST": int(8.75 * 3600),
+        "ADT":   int(4 * 3600),
+        "AEDT":  int(11 * 3600),
+        "AEST":  int(10 * 3600),
+        "AET":   int(10 * 3600),
+        "AFT":   int(4.5 * 3600),
+        "AKDT":  int(-8 * 3600),
+        "AKST":  int(-9 * 3600),
+        "ALMT":  int(6 * 3600),
+        "AMST":  int(-3 * 3600),
+        "AMT":   int(-4 * 3600),
+        "ANAST": int(12 * 3600),
+        "ANAT":  int(12 * 3600),
+        "AQTT":  int(5 * 3600),
+        "ART":   int(-3 * 3600),
+        "AST":   int(3 * 3600),
+        "AT":    int(-4 * 3600),
+        "AWDT":  int(9 * 3600),
+        "AWST":  int(8 * 3600),
+        "AZOST": int(0 * 3600),
+        "AZOT":  int(-1 * 3600),
+        "AZST":  int(5 * 3600),
+        "AZT":   int(4 * 3600),
+        "AoE":   int(-12 * 3600),
+        "B":     int(2 * 3600),
+        "BNT":   int(8 * 3600),
+        "BOT":   int(-4 * 3600),
+        "BRST":  int(-2 * 3600),
+        "BRT":   int(-3 * 3600),
+        "BST":   int(6 * 3600),
+        "BTT":   int(6 * 3600),
+        "C":     int(3 * 3600),
+        "CAST":  int(8 * 3600),
+        "CAT":   int(2 * 3600),
+        "CCT":   int(6.5 * 3600),
+        "CDT":   int(-5 * 3600),
+        "CEST":  int(2 * 3600),
+        "CET":   int(1 * 3600),
+        "CHADT": int(13.75 * 3600),
+        "CHAST": int(12.75 * 3600),
+        "CHOST": int(9 * 3600),
+        "CHOT":  int(8 * 3600),
+        "CHUT":  int(10 * 3600),
+        "CIDST": int(-4 * 3600),
+        "CIST":  int(-5 * 3600),
+        "CKT":   int(-10 * 3600),
+        "CLST":  int(-3 * 3600),
+        "CLT":   int(-4 * 3600),
+        "COT":   int(-5 * 3600),
+        "CST":   int(-6 * 3600),
+        "CT":    int(-6 * 3600),
+        "CVT":   int(-1 * 3600),
+        "CXT":   int(7 * 3600),
+        "ChST":  int(10 * 3600),
+        "D":     int(4 * 3600),
+        "DAVT":  int(7 * 3600),
+        "DDUT":  int(10 * 3600),
+        "E":     int(5 * 3600),
+        "EASST": int(-5 * 3600),
+        "EAST":  int(-6 * 3600),
+        "EAT":   int(3 * 3600),
+        "ECT":   int(-5 * 3600),
+        "EDT":   int(-4 * 3600),
+        "EEST":  int(3 * 3600),
+        "EET":   int(2 * 3600),
+        "EGST":  int(0 * 3600),
+        "EGT":   int(-1 * 3600),
+        "EST":   int(-5 * 3600),
+        "ET":    int(-5 * 3600),
+        "F":     int(6 * 3600),
+        "FET":   int(3 * 3600),
+        "FJST":  int(13 * 3600),
+        "FJT":   int(12 * 3600),
+        "FKST":  int(-3 * 3600),
+        "FKT":   int(-4 * 3600),
+        "FNT":   int(-2 * 3600),
+        "G":     int(7 * 3600),
+        "GALT":  int(-6 * 3600),
+        "GAMT":  int(-9 * 3600),
+        "GET":   int(4 * 3600),
+        "GFT":   int(-3 * 3600),
+        "GILT":  int(12 * 3600),
+        "GMT":   int(0 * 3600),
+        "GST":   int(4 * 3600),
+        "GYT":   int(-4 * 3600),
+        "H":     int(8 * 3600),
+        "HDT":   int(-9 * 3600),
+        "HKT":   int(8 * 3600),
+        "HOVST": int(8 * 3600),
+        "HOVT":  int(7 * 3600),
+        "HST":   int(-10 * 3600),
+        "I":     int(9 * 3600),
+        "ICT":   int(7 * 3600),
+        "IDT":   int(3 * 3600),
+        "IOT":   int(6 * 3600),
+        "IRDT":  int(4.5 * 3600),
+        "IRKST": int(9 * 3600),
+        "IRKT":  int(8 * 3600),
+        "IRST":  int(3.5 * 3600),
+        "IST":   int(5.5 * 3600),
+        "JST":   int(9 * 3600),
+        "K":     int(10 * 3600),
+        "KGT":   int(6 * 3600),
+        "KOST":  int(11 * 3600),
+        "KRAST": int(8 * 3600),
+        "KRAT":  int(7 * 3600),
+        "KST":   int(9 * 3600),
+        "KUYT":  int(4 * 3600),
+        "L":     int(11 * 3600),
+        "LHDT":  int(11 * 3600),
+        "LHST":  int(10.5 * 3600),
+        "LINT":  int(14 * 3600),
+        "M":     int(12 * 3600),
+        "MAGST": int(12 * 3600),
+        "MAGT":  int(11 * 3600),
+        "MART":  int(9.5 * 3600),
+        "MAWT":  int(5 * 3600),
+        "MDT":   int(-6 * 3600),
+        "MHT":   int(12 * 3600),
+        "MMT":   int(6.5 * 3600),
+        "MSD":   int(4 * 3600),
+        "MSK":   int(3 * 3600),
+        "MST":   int(-7 * 3600),
+        "MT":    int(-7 * 3600),
+        "MUT":   int(4 * 3600),
+        "MVT":   int(5 * 3600),
+        "MYT":   int(8 * 3600),
+        "N":     int(-1 * 3600),
+        "NCT":   int(11 * 3600),
+        "NDT":   int(2.5 * 3600),
+        "NFT":   int(11 * 3600),
+        "NOVST": int(7 * 3600),
+        "NOVT":  int(7 * 3600),
+        "NPT":   int(5.5 * 3600),
+        "NRT":   int(12 * 3600),
+        "NST":   int(3.5 * 3600),
+        "NUT":   int(-11 * 3600),
+        "NZDT":  int(13 * 3600),
+        "NZST":  int(12 * 3600),
+        "O":     int(-2 * 3600),
+        "OMSST": int(7 * 3600),
+        "OMST":  int(6 * 3600),
+        "ORAT":  int(5 * 3600),
+        "P":     int(-3 * 3600),
+        "PDT":   int(-7 * 3600),
+        "PET":   int(-5 * 3600),
+        "PETST": int(12 * 3600),
+        "PETT":  int(12 * 3600),
+        "PGT":   int(10 * 3600),
+        "PHOT":  int(13 * 3600),
+        "PHT":   int(8 * 3600),
+        "PKT":   int(5 * 3600),
+        "PMDT":  int(-2 * 3600),
+        "PMST":  int(-3 * 3600),
+        "PONT":  int(11 * 3600),
+        "PST":   int(-8 * 3600),
+        "PT":    int(-8 * 3600),
+        "PWT":   int(9 * 3600),
+        "PYST":  int(-3 * 3600),
+        "PYT":   int(-4 * 3600),
+        "Q":     int(-4 * 3600),
+        "QYZT":  int(6 * 3600),
+        "R":     int(-5 * 3600),
+        "RET":   int(4 * 3600),
+        "ROTT":  int(-3 * 3600),
+        "S":     int(-6 * 3600),
+        "SAKT":  int(11 * 3600),
+        "SAMT":  int(4 * 3600),
+        "SAST":  int(2 * 3600),
+        "SBT":   int(11 * 3600),
+        "SCT":   int(4 * 3600),
+        "SGT":   int(8 * 3600),
+        "SRET":  int(11 * 3600),
+        "SRT":   int(-3 * 3600),
+        "SST":   int(-11 * 3600),
+        "SYOT":  int(3 * 3600),
+        "T":     int(-7 * 3600),
+        "TAHT":  int(-10 * 3600),
+        "TFT":   int(5 * 3600),
+        "TJT":   int(5 * 3600),
+        "TKT":   int(13 * 3600),
+        "TLT":   int(9 * 3600),
+        "TMT":   int(5 * 3600),
+        "TOST":  int(14 * 3600),
+        "TOT":   int(13 * 3600),
+        "TRT":   int(3 * 3600),
+        "TVT":   int(12 * 3600),
+        "U":     int(-8 * 3600),
+        "ULAST": int(9 * 3600),
+        "ULAT":  int(8 * 3600),
+        "UTC":   int(0 * 3600),
+        "UYST":  int(-2 * 3600),
+        "UYT":   int(-3 * 3600),
+        "UZT":   int(5 * 3600),
+        "V":     int(-9 * 3600),
+        "VET":   int(-4 * 3600),
+        "VLAST": int(11 * 3600),
+        "VLAT":  int(10 * 3600),
+        "VOST":  int(6 * 3600),
+        "VUT":   int(11 * 3600),
+        "W":     int(-10 * 3600),
+        "WAKT":  int(12 * 3600),
+        "WARST": int(-3 * 3600),
+        "WAST":  int(2 * 3600),
+        "WAT":   int(1 * 3600),
+        "WEST":  int(1 * 3600),
+        "WET":   int(0 * 3600),
+        "WFT":   int(12 * 3600),
+        "WGST":  int(-2 * 3600),
+        "WGT":   int(-3 * 3600),
+        "WIB":   int(7 * 3600),
+        "WIT":   int(9 * 3600),
+        "WITA":  int(8 * 3600),
+        "WST":   int(14 * 3600),
+        "WT":    int(0 * 3600),
+        "X":     int(-11 * 3600),
+        "Y":     int(-12 * 3600),
+        "YAKST": int(10 * 3600),
+        "YAKT":  int(9 * 3600),
+        "YAPT":  int(10 * 3600),
+        "YEKST": int(6 * 3600),
+        "YEKT":  int(5 * 3600),
+        "Z":     int(0 * 3600),
+}
+# this is podcast episode, intended to mirror records in the episodes database table
+# TODO: make this handle more sources of podcast episode inforation. Right now it is tied to the dict output of RssStream.
+#       want it to accept RSS <item></item> snippet, and perhaps an entire RSS file plus an index value. Maybe rewrite RssStream to use JSON?
+class podcast_episode(object):
+	def __init__(self,i, podcast_show = None):
+		'''i is an RSS item'''
+		self.podcast_show = podcast_show
+		self.pubdate = i['pubDate']['content']
+		if isinstance(self.pubdate,str):
+			#if   "PDT" in self.pubdate or "PST" in self.pubdate:
+			#	#PAC=tz.gettz("America/Los_Angeles")
+			#	PST="PST+8"
+			#	PDT="PST+7"
+			#	self.pubdate = dateutil.parser.parse(self.pubdate, tzinfos={"PDT":PDT, "PST":PST})
+			#elif "CDT" in self.pubdate or "CST" in self.pubdate:
+			#	CDT="CDT+5"
+			#	CST="CST+6"
+			#	self.pubdate = dateutil.parser.parse(self.pubdate, tzinfos={"CDT":CDT, "CST":CST})
+			#else:
+			self.pubdate = dateutil.parser.parse(self.pubdate, tzinfos=whois_timezone_info)
+
+		self.title   = i['title']['content']
+		try:
+			self.description = i['description']['content']
+		except KeyError as e:
+			if "itunes:summary" in i:
+				self.description = i['itunes:summary']['content']
+			else:
+				self.description = ''
+
+		try:
+			self.enclosure = i['enclosure']['attributes']
+		except KeyError as e:
+			self.enclosure=None
+
+		try:
+			self.link = i['link']['content']
+		except KeyError as e:
+			self.link=None
+
+		if self.enclosure is not None:
+			self.type = self.enclosure['type']
+			self.url  = self.enclosure['url']
+			try:
+				self.length = int(self.enclosure['length'])
+			except ValueError as e:
+				self.length = 0
+			except KeyError as e:
+				self.length = 0
+		else:
+			self.type   = None
+			self.url    = None
+			self.length = 0
+
+
+		try: self.itunes_subtitle = i['itunes:subtitle']
+		except KeyError as e: self.itunes_subtitle = None
+		try: self.itunes_episodeType = i['itunes:episodeType']
+		except KeyError as e: self.itunes_episodeType = None
+		try: self.itunes_duration = i['itunes:duration']
+		except KeyError as e: self.itunes_duration = None
+		try: self.itunes_author = i['itunes:author']
+		except KeyError as e: self.itunes_author = None
+		try: self.itunes_summary = i['itunes:summary']
+		except KeyError as e: self.itunes_summary = None
+		try: self.itunes_image = i['itunes:image']['attributes']['href']
+		except KeyError as e: self.itunes_image = None
+		try: self.itunes_explicit = i['itunes:explicit']
+		except KeyError as e: self.itunes_explicit = None
+		try: self.itunes_keywords = i['itunes:keywords']
+		except KeyError as e: self.itunes_keywords = None
+
+		try:
+			self.guid = i['guid']['content']
+		except KeyError as e:
+			self.guid = self.url
+			self.guid_is_permalink = True
+
+		try:
+			attributes = i['guid']['attributes']
+		except KeyError as e:
+			attributes = None
+
+		if attributes is not None and len(attributes) > 0:
+			if   attributes['isPermaLink'].lower() == "false":
+				self.guid_is_permalink = False
+			elif attributes['isPermaLink'].lower() == "true":
+				self.guid_is_permalink = True
+			else:
+				raise RuntimeError("isPermaLink value {} is not recognized".format(attributes['isPermaLink']))
+
+		self.original_url = self.url
+
+	def analyse(self,conn):
+		ID = self.podcast_show.castid
+		debug("analysing podcast {ID} episode titled {title}".format(ID=ID, title=self.title,l=0))
+		guidnumseen = 0
+		guidSQL="select count(*) from episodes where castid = ? and epguid = ? and status = 'Downloaded';"
+		guidargs = (ID, self.guid,)
+		with conn:
+			c = conn.cursor()
+			c.execute(guidSQL,guidargs)
+			guidnumseen = c.fetchone()[0]
+		urlnumseen = 0
+		urlSQL="select count(*) from episodes where castid = ? and epurl = ? and status = 'Downloaded';"
+		urlargs = (ID, self.url,)
+		with conn:
+			c = conn.cursor()
+			c.execute(urlSQL,urlargs)
+			urlnumseen = c.fetchone()[0]
+		datenumseen = 0
+		dateSQL="select count(*) from episodes where castid = ? and eppubdate = ? and status = 'Downloaded';"
+		dateargs = (ID, self.pubdate,)
+		with conn:
+			c = conn.cursor()
+			c.execute(dateSQL,dateargs)
+			datenumseen = c.fetchone()[0]
+		if guidnumseen > 0 or urlnumseen > 0 or datenumseen > 0:
+			warn("analysis of {title}: same guid: {guid} eps, same url: {url} eps, same pubdate: {date} eps".format(guid=guidnumseen, url=urlnumseen, date=datenumseen,title=self.title))
+
+	def resolveurl(self):
+		# look for redirects so we can consider both the original URL and the redirected URL later when choosing an output file name
+		self.directed_url = None
+		debug("decoding {}".format(self.url))
+		self.url=urldecode(self.url)
+
+		try:
+			r = curl(self.url, allow_redirects=False)
+		except Exception as e:
+			outcome = handle_requests_error(e,self.url)
+			if "retries=" in outcome or outcome == "giveup":
+				#return None
+				raise e
+			elif outcome == "proceed":
+				pass
+			elif outcome == "raise":
+				raise e
+
+		if r is not None and is_redirect(r):
+			self.directed_url = r.headers['location']
+		r.close()
+
+	def makefile(self):
+		self.resolveurl()
+
+		fil=url2filename(self.url,self.title)
+
+		if self.directed_url is not None:
+			directed_fil = url2filename(self.directed_url, self.title, preredirname=fil)
+			if directed_fil != fil:
+				debug("redirected url is {} => {}, redirected name {} => {}".format(self.url, self.directed_url, fil, directed_fil))
+			else:
+				debug("redirected url is {} => {}".format(self.url, self.directed_url))
+			if USE_REDIRECT_INFO:
+				fil = directed_fil
+
+		podfile = podcast_file(name=fil, podcast_episode=self)
+		return podfile
+
+
+# This is a podcast file object, intended to make handling downloading easier
+class podcast_file(object):
+	def __init__(self,name, podcast_episode):
+		self.name = name
+		self.podcast_episode = podcast_episode
+		self.podcast_show = podcast_episode.podcast_show
+
+	def download(self,DIR="."):
+
+		tf = mymktempfile("mediadl")
+
+		if NOTHE:
+			DIR=re.sub(r'^[tT]he ', '', DIR)
+
+		debug("downloading {} into {}/{}".format(self.podcast_episode.url,DIR,self.name))
+		# by repeating the request this time allowing redirects, we ensure that all the 302,303,301,307 differences are handled, EXCEPT that we can't handle a 301 which expect us to record the updated URL into the ID3 info, because this code needs to be restructured, and honestly it doesn't make any sense to do so in the ckntext of a file download.
+		r = curl(self.podcast_episode.url,tf, allow_redirects=True)
+
+		MSG="error downloading {} (downloadepisode); ".format(self.podcast_episode.url);
+		if r is None:
+			#case $ret in
+			#	47) MSG="$MSG, Too many redirects";;
+			#	*)  MSG="$MSG, curl returned $ret";;
+			#esac
+			warn(MSG + " response is empty")
+
+			if os.stat(tf).st_size > 0:
+				debug("Keeping temporary file {}".format(tf))
+			else:
+				debug("Deleting empty temporary file {}".format(tf))
+				os.unlink(tf)
+			return None #fail
+
+		try:
+			CT=r.headers['content-type']
+		except KeyError as e:
+			warn(MSG + "content-type absent from response header, headers are {}".format(r.headers))
+
+			if os.stat(tf).st_size <= 0:
+				warn("Deleting empty temporary file {}".format(tf))
+				os.unlink(tf)
+				return None #fail
+			debug("Keeping temporary file {}".format(tf))
+			CT="application/octet-stream"
+
+		if os.stat(tf).st_size <= 0:
+			os.unlink(tf)
+			warn("No error given on download, but temporary file {} is empty, deleting".format(tf))
+			return None # fail
+
+		if CT.lower() != self.podcast_episode.type.lower():
+			debug("Warning: expected content-type: {}, got content-type from server: {} for {}".format(self.podcast_episode.type, CT, self.podcast_episode.url))
+
+		MT = magic.from_file(tf,mime=True)
+		if self.podcast_episode.type.lower() != MT.lower():
+			debug("Warning: expected content-type: {}, got content-type from file: {} for {}".format(self.podcast_episode.type, MT, self.podcast_episode.url))
+
+		try:
+			os.mkdir(DIR)
+		except FileExistsError as e:
+			pass
+		except PermissionError as e:
+			warn("Don't have permission to create {}, exiting".format(DIR))
+			exit(8)
+
+		if '%' in self.name:
+			warn("File name {} may need decoding.".format(self.name))
+			try:
+				fil = urldecode(self.name)
+				self.name = fil
+				warn("Decoded name is {}.".format(self.name))
+			except ValueError as e:
+				warn("Decoding of {} failed. Carryin1 on...".format(self.name))
+
+		outfile = path.join(DIR, self.name)
+		if path.isfile(outfile):
+			debug("file {} exists".format(outfile))
+			SEC="{}-{}".format(MYPID, round(time.time()))
+			self.rename=re.sub(r'([^.]*)\.',r'\1-{}.'.format(SEC),self.name)
+			outfile = path.join(DIR, self.rename)
+			debug("blindly renamed to {} instead".format(outfile))
+			# still a race condition here, but I don't care.
+		try:
+			os.replace(tf, outfile)
+		except OSError as e:
+			warn("FAILED to rename tempfile {} to {}; fatal error ({})".format(tf,outfile,e))
+			exit(7)
+
+		self.file = outfile
+
+		try:
+			os.chmod(self.file, stat.S_IRUSR|stat.S_IWUSR|stat.S_IRGRP|stat.S_IROTH)
+		except OSError as e:
+			warn("FAILED to make {} readable; weird but moving on ({})".format(tf,self.file,e))
+
+		self.dlsize=os.stat(self.file).st_size
+		debug('''"{}" given size: {}; dl size: {}'''.format(self.file,self.podcast_episode.length,self.dlsize), l=1)
+
+		if self.podcast_episode.length != self.dlsize:
+			if self.podcast_episode.length != 0:
+				warn('''"{}" SIZE MISMATCH. expected size: {}; file size: {}'''.format(self.file,self.podcast_episode.length,self.dlsize))
+
+		return self.file
+
+	def normalize(self, tzo=None):
+		updateid3(self)
+		pdate = self.podcast_episode.pubdate.astimezone(tzo)
+		stinfo = os.stat(self.file)
+		debug("Set filetime to {}".format(pdate.isoformat(' ')),l=0)
+		# lets you sort by date; handy when grabbing new podcast with big backlog but no sane file numbering scheme: just do "ls -t" to list in timestamp order.
+		err = None
+		for r in range(3):
+			try:
+				os.utime(self.file,(stinfo.st_atime, time.mktime(pdate.timetuple())))
+				return
+			except Exception  as e:
+				# Get various types of OSError here: permission denied, stale file handle; probably due to NFS.
+				err = e
+				warn("got {} while setting file time; taking 5 seconds".format(e))
+				time.sleep(5)
+		raise err	
+
+def fixpubdates(podshow):
+	ID=podshow.castid
+	URL=podshow.url
+	TITLE=podshow.castname
+
+	debug( '''TITLE is "{}"'''.format(TITLE), l=2)
+
+	try:
+		barrier.wait()
+		r = RssStreamParser(URL,ua=UA,timeout=RTIMEOUTS,verb=(DEBUG>1))	
+	except Exception as e:
+		outcome = handle_requests_error(e,URL,othercontext=podshow)
+		if "retries=" in outcome or outcome == "giveup":
+			return
+		elif outcome == "proceed":
+			pass
+		elif outcome == "raise":
+			raise e
+
+	try:
+		items = list(r.parseItems())
+	except TypeError as e:
+		warn('''{} response code was {} (fixpubdates)'''.format(URL,r.resp.status_code))
+		if len(r.text) == 0:
+			warn('''response is empty.''')
+		else:
+			warn('''response text was ->{}<-'''.format(r.text))
+		if "'NoneType' object is not iterable" in str(e):
+			warn('''response has no items''')
+			return
+		else:
+			warn('''response text was {}'''.format(URL,r.text))
+			raise e
+		
+	itemcnt = len(items)
+	if itemcnt <=0:
+		debug('''Couldn't find any items in {}\n{}'''.format(URL, r.text))
+		return
+	debug("Found {} items in RSS".format(itemcnt))
+
+	for i in items:
+		ep = podcast_episode(i)
+		SQL = 'select eppubdate from episodes where castid = ? and epguid = ?'
+		args = (ID,ep.guid,)
+		with conn:
+			c = conn.cursor()
+			c.execute(SQL,args)
+			p = c.fetchone()[0]
+			if p is None:
+				SQL = 'update episodes set eppubdate = ? where castid = ? and epguid = ?'
+				args = (ep.pubdate, ID, ep.guid,)
+				c2 = conn.cursor()
+				c2.execute(SQL,args)
+			else:
+				#print("{}, {}, {}".format(p,ID, ep.guid))
+				pass
+
+def updatefeedurl(podshow,newurl):
+	warn("Updating {} (castid {}) to {}".format(podshow.url,podshow.castid,newurl))
+	sql = "UPDATE podcasts SET feedurl = ? WHERE castid = ?;"
+	args=(newurl,podshow.castid,)
+	debug("{},{}".format(sql,args),l=1)
+	with conn:
+		c=conn.cursor()
+		c.execute(sql,args)
+
+def checkpodcast(podshow):
+	OUTPUTDIR=title2filename(podshow.castname)
+	debug( '''TITLE is "{}", OUTDIR is "{}"'''.format(podshow.castname,OUTPUTDIR), l=2)
+	carp = False
+	keeptrying = True
+	retries = 3
+	while keeptrying:
+		try:
+			resp = curl(podshow.url, allow_redirects=True)
+			keeptrying = False
+		except Exception as e:
+			keeptrying = False
+			podshow.mark_attempt(success=False)
+			carp = podshow.carp()
+			st = "{} failed attempts: {}".format(podshow.url, podshow.failedattempts())
+			if carp: warn(st)
+			else: debug(st)
+			outcome = handle_requests_error(e,podshow.url,retries=retries,othercontext=podshow)
+			if "retries=" in outcome:
+				keeptrying = True
+				retries-=1
+				if carp or DEBUG: warn("Retrying")
+			elif outcome == "giveup":
+				if carp or DEBUG: warn("Giving up")
+				return
+			elif outcome == "proceed":
+				#pass
+				return # need a response object in order to pass
+			elif outcome == "raise":
+				raise e
+
+	# oldest to newest
+	last_code = 0
+	last_url  = None
+	unbroken=True
+	for i,h in enumerate([*resp.history,resp]):
+		debug("{}: {} {}".format(i,h.url,h.status_code))
+		if last_code == 301:
+			if unbroken:
+				debug("We should permanently update RSS URL from {} to {}".format(last_url,h.url))
+			else:
+				# so apparently this is ok, because some feed hosts permanantly use temporary redirects to map from a vanity (e.g. podcast.provider1.com) hostname to a non-vanity one (www.provider1.com/podcast), but then if the podcast found another hosting service, the permanent redirect will come from the non-vanity host, after the temororary redirect.
+				warn("Received a permanent redirect after a temporary redirect! OK, I guess.")
+			updatefeedurl(podshow,h.url)
+			podshow.url = h.url
+		elif last_code != 0:
+			unbroken = False
+			debug("FYI went from {} to {} on a {}".format(last_url, h.url, last_code))
+		last_code = h.status_code
+		last_url  = h.url
+
+	barrier.wait()
+	r = RssStreamParser(podshow.url,resp=resp,ua=UA,timeout=RTIMEOUTS,verb=(DEBUG>1),raize=True)	
+	# TODO: should check for itunes:new-feed-url in both original feed URL (indicating need to update) and new feed URL (indicating codrect to permanently update)
+
+	if r.resp.status_code == 429:
+		sle = 0
+		st = '''Too May Requests to {}'''.format(podshow.url)
+		if 'retry_after' in resp.headers:
+			st += ''', should retry after {} seconds'''.format(r.resp.headers['retry_after'])
+			sle = int(r.resp.headers['retry_after'])
+		if carp: warn(st)
+		else: debug(st)
+		if sle:
+			time.sleep(sle)
+		else:
+			return # Grr
+
+	try:
+		items = list(r.parseItems())
+	except RssParseException as e:
+		podshow.mark_attempt(success=False)
+		carp = podshow.carp()
+		if carp: 
+			warn('''Could not parse RSS at {}'''.format(podshow.url))
+			warn("failed attempts: {}".format(podshow.failedattempts()))
+		else:
+			debug('''Could not parse RSS at {}'''.format(podshow.url))
+			debug("failed attempts: {}".format(podshow.failedattempts()))
+		return
+	except TypeError as e:
+		podshow.mark_attempt(success=False)
+		carp = podshow.carp()
+		st = '''{} response code was {} (checkpodcast TypeError)\n'''.format(podshow.url,r.resp.status_code)
+		st += "failed attempts: {}".format(podshow.failedattempts())
+		if carp: warn(st)
+		else:   debug(st)
+
+		if len(r.text) == 0:
+			if carp: warn('''response is empty.''')
+			else: debug('''response is empty.''')
+		else:
+			if carp: warn('''response text was ->{}<-'''.format(r.text))
+			else: debug('''response text was ->{}<-'''.format(r.text))
+		if "'NoneType' object is not iterable" in str(e):
+			if carp: warn('''response has no items''')
+			else: debug('''response has no items''')
+			return
+		else:
+			if carp: warn('''response text from {} was {}'''.format(podshow.url,r.text))
+			else: debug('''response text from {} was {}'''.format(podshow.url,r.text))
+			raise e
+	# requests.exceptions.ChunkedEncodingError: ("Connection broken: ConnectionResetError(104, 'Connection reset by peer')", ConnectionResetError(104, 'Connection reset by peer'))
+	except requests.exceptions.ChunkedEncodingError as e:
+		warn('''{} response code was {} (checkpodcast ChunkedEncodingError)'''.format(podshow.url,r.resp.status_code))
+		podshow.mark_attempt(success=False)
+		carp = podshow.carp()
+		st = "failed attempts: {}".format(podshow.failedattempts())
+		if carp: warn(st)
+		else:   debug(st)
+		if "ConnectionResetError" in str(e):
+			warn('''Connect was reset for {}'''.format(podshow.url))
+			return
+		else:
+			warn('''response text from {} was {}'''.format(podshow.url,r.text))
+			raise e
+
+	itemcnt = len(items)
+	if itemcnt <=0:
+		podshow.mark_attempt(success=False)
+		carp = podshow.carp()
+		if carp: 
+			warn('''Couldn't find any items in {}'''.format(podshow.url))
+			warn("failed attempts: {}".format(podshow.failedattempts()))
+		else: 
+			debug('''Couldn't find any items in {}\n{}'''.format(podshow.url, r.text))
+			debug("failed attempts: {}".format(podshow.failedattempts()))
+		return
+	debug("Found {} items in RSS".format(itemcnt))
+	podshow.mark_attempt(success=True)
+
+	# $SEL -t -m "item" -v "pubDate" -o "|" -v "title" -m "enclosure[1]" -o "|" -v "@type" -o "|" -v "@length" -o "|" -v "@url" -b -n 
+	for i in items:
+
+		ep = podcast_episode(i, podcast_show=podshow)
+		if seen(podshow,ep):
+			debug("previously downloaded {} {} {}".format(ep.title, ep.pubdate, ep.url), l=1)
+			continue
+		if CATCHUP:
+			warn("skipping download of {} ({}) due to catchup command".format(ep.title,ep.url))
+			#markdownloaded(podshow.castid, ep.url, ep.title, ep.type, ep.length)
+			markdownloaded(podshow, ep)
+			continue
+		else:
+			ep.analyse(conn)
+			if ep.enclosure is None:
+				warn("No enclosure in RSS feed item from {}. Skipping after these details:.".format(podshow.url))
+				display_item_text(podshow.url,ep.pubdate,ep.title,ep.description)
+				markdownloaded(podshow, ep)
+				continue
+			if ep.url is None:
+				debug("no url found in enclosure {} {}".format(ep.title, ep.pubdate))
+				display_item_text(podshow.url,ep.pubdate,ep.title,ep.description)
+				markdownloaded(podshow, ep)
+				continue
+
+			debug("Downloading new episode, {}".format(ep.pubdate), l=1)
+			podfile = ep.makefile()
+			NEWFILE=podfile.download(OUTPUTDIR)
+			if NEWFILE is not None:
+				debug("Downloaded {}".format(podfile.file),l=1)
+				podfile.normalize(tzo=LOCALTZ)
+			else:
+				debug("Failed to receive filename from downloadepisode")
+
+			try: # if there's an error THEN GUESS WHAT IT'S NOT A FILE
+				isitafile = path.isfile(podfile.file)
+			except Exception as e:
+				warn('''Got error "{}" when checking for new file "{}", so it's probably not a file'''.format(e,podfile.file))
+				isitafile = False
+
+			if isitafile:
+				print('''Downloaded "{}" episode "{}" ({}) to "{}"'''.format(podshow.castname, ep.title, ep.url,podfile.file))
+				#markdownloaded(podshow.castid, ep.url, ep.title, ep.type, ep.length)
+				markdownloaded(podshow, ep)
+			else:
+				print('''Failed to download {} episode {} ("{}")'''.format(TITLE, ep.title, ep.url))
+				# XXX: do "markdownloaderror" here
+
+def setdir(DIR):
+	debug("Setting output podcast directory to {}".format(DIR))
+
+	if path.islink(OUTDIR):
+		debug("Old directory is symlink, deleting link")
+		os.unlink(OUTDIR)
+
+	if path.isdir(OUTDIR):
+		debug("Old directory is real directory, renaming it")
+		TMP="{}-old-{}".format(OUTDIR,round(time.time()))
+		try:
+			os.replace(OUTDIR,TMP)
+		except OSError as e:
+			warn("FAILED to rename old directory to {}; fatal error ({})".format(TMP,e))
+			exit(7)
+			
+		warn("Renamed old directory to {}".format(TMP))
+
+	debug("Creating symbolic link from {} to {}".format(DIR,OUTDIR))
+	try:
+		os.symlink(DIR,OUTDIR)
+	except PermissionError as e:
+		warn("FAILED to symlink from {} to {}; fatal error ({})".format(DIR,OUTDIR,e))
+		exit(7)
+
+def checkdir():
+	debug("Checking output podcast directory.")
+	print("Internal directory: {}".format(OUTDIR))
+	if path.isdir(OUTDIR):
+		print("	It exists and is a directory")
+	else:
+		print("	It does NOT exist or is NOT a directory (FATAL ERROR, fix with setdir command)")
+		exit(7)
+
+	if path.islink(OUTDIR):
+		print("	It is a symlink: {}".format(os.readlink(OUTDIR)))
+	else:
+		print("	It is NOT a symlink")
+
+	if os.access(OUTDIR, os.W_OK):
+		print("	It is writable")
+	else:
+		print("	It is NOT writable (FATAL ERROR)")
+		exit(7)
+
+
+if __name__ == "__main__":
+	try:
+		magic.from_file(sys.argv[0])
+	except AttributeError as e:
+		warn('''Wrong version of python3-magic is installed; Might be too new for me''')
+		exit(9)
+
+	atexit.register(guido)
+	#trap 'wait; test $DEBUG -gt 0 && echo "$ME exiting" >&2; for i in $TEMPLATE-*; do rm -f "$i";test $DEBUG -gt 2 && echo "deleting $i" >&2; done;' EXIT
+
+	LOCK = os.open(sys.argv[0],os.O_RDONLY)
+	try:
+		flock(LOCK,LOCK_EX|LOCK_NB)
+	except IOError as e:
+		print("{} is already running".format(ME))
+		if len(sys.argv) > 1 and "list" in sys.argv[1]:
+			print("Allowing listing")
+		else:
+			exit(3)
+
+	# handle how we were invoked
+	CMD=None
+	CAST=None
+	LISTALL=False
+	DLURL=None
+	NEWFEEDURL=None
+	try:
+		args=sys.argv[1:]
+	
+		while len(args) > 0:
+			arg = args[0]
+			if   arg == "checklock":
+				debug("checklock passed")
+				exit(0)
+			elif arg == "setdir":
+				CMD=arg
+				try:
+					NEWDIR=args[1]
+				except Exception as e:
+					NEWDIR=None
+				if NEWDIR is None or NEWDIR == '' or not path.isdir(NEWDIR):
+					warn('''Directory to set as output directory required.\n{}'''.format(usage()))
+					exit(2)
+				args = args[1:]
+	
+			elif arg == "checkdir":
+				CMD=arg
+	
+			elif arg == "add":
+				CMD=arg
+				CAST=args[1]
+				args = args[1:]
+	
+			elif arg == "download":
+				CMD=arg
+				DLURL=args[1]
+				args = args[1:]
+	
+			elif arg == "update":
+				CMD=arg
+			elif arg == "fixpubdates":
+				CMD=arg
+	
+			elif arg == "paraupdate":
+				CMD="update"
+				PARANUM=args[1]
+				if PARANUM is None or PARANUM == '':
+					PARANUM=3
+				else:
+					try:
+						PARANUM=int(PARANUM)
+					except ValueError as e:
+						warn('''Integer number required for paraupdate\n{}'''.format(usage()))
+						exit(2)
+					args = args[1:]
+	
+			elif arg == "updatecast":
+				CMD="update"
+				CAST=args[1]
+				args = args[1:]
+			elif arg == "updatefeedurl":
+				CMD="updatefeedurl"
+				CAST=args[1]
+				NEWFEEDURL=args[2]
+				args = args[2:]
+			elif arg == "catchup":
+				pass
+				#CMD="update"
+				#CATCHUP=True
+			elif arg == "catchupcast":
+				CMD="update"
+				CATCHUP=True
+				CAST=args[1]
+				args = args[1:]
+			elif arg == "episodes":
+				CMD=arg
+				try:
+					CAST = args[1]
+					args = args[1:]
+				except IndexError as e:
+					pass
+			elif arg == "list":
+				CMD=arg
+			elif arg == "listall":
+				CMD="list"
+				LISTALL=True
+			elif arg == "disable":
+				CMD=arg
+				CAST=args[1]
+				args = args[1:]
+			elif arg == "enable":
+				CMD=arg
+				CAST=args[1]
+				args = args[1:]
+			elif arg == "reset":
+				CMD=arg
+				CAST=args[1]
+				args = args[1:]
+			elif arg == "-h" or arg == "help":
+				warn(usage())
+				exit(0)
+			elif arg == "-d":
+				DEBUG=1
+			elif arg == "-d1":
+				DEBUG=1
+			elif arg == "-d2":
+				DEBUG=2
+			elif arg == "-d3":
+				DEBUG=3
+			elif arg == "-v":
+				VERBO=True
+			elif arg == "-q":
+				QUIET=True
+			else:
+				warn('''Unknown argument "{}"\n{}'''.format(arg,usage()))
+			args = args[1:]
+	except IndexError as e:
+		warn(usage())
+		exit(2)
+	
+	debug("Command is {}".format(CMD))
+	debug("Catchup is {}".format(CATCHUP))
+	debug("Number of parallel podcast checks is {}".format(PARANUM))
+	debug("Listall is {}".format(LISTALL))
+	debug("CAST is {}".format(CAST))
+	
+	
+	# check / set up directory
+	if not path.isdir(MYHOME):
+		debug("Directory {} doesn't exist.".format(MYHOME))
+		try:
+			os.mkdir(MYHOME)
+		#except FileExistsError as e:
+		#	warn("Can't create $MYHOME (FATAL ERROR)")
+		#	exit(8)
+		except PermissionError as e:
+			warn("Can't create $MYHOME (FATAL ERROR)")
+			exit(8)
+	
+	# check or set up output directory
+	if CMD == "setdir":
+		setdir(NEWDIR)
+		CMD="checkdir"
+	
+	if CMD == "checkdir":
+		checkdir()
+		exit(0)
+	
+	# check / set up database
+	FILEVER=getdbver()
+	# handle no file and empty file cases
+	if not path.isfile(PODDB) or FILEVER == 0:
+		debug("Creating database {}".format(PODDB))
+		makepoddbV2()
+		FILEVER=getdbver()
+	debug("Database {} exists and is at version {}".format(PODDB,FILEVER))
+	if FILEVER > DBVER:
+		warn("Database $PODDB is schema version $FILEVER but I only support {}".format(DBVER))
+		exit(1)
+	else:
+		debug("Database schema {} supported by this code".format(DBVER))
+	
+	# !!!!! this is key, changing directory for output purposes here.
+	try:
+		os.chdir(OUTDIR)
+	except (PermissionError, FileNotFoundError) as e:
+		warn('''Error: output directory is not set or not accessible. Check it with \"checkdir\" and set it with \"setdir\" commands\n{}'''.format(usage()))
+		checkdir()
+		exit(6)
+	debug("Changed directory to {}".format(OUTDIR))
+	
+	if CMD == "episodes":
+		listepisodes(CAST)
+	
+	elif CMD == "disable":
+		ID=disablepodcast(CAST)
+		if ID > 0:
+			warn("Disabled {}".format(CAST))
+		else:
+			warn("Can't disabled {} (not in DB)".format(CAST))
+	
+	elif CMD == "enable":
+		ID=enablepodcast(CAST)
+		if ID > 0:
+			warn("Enabled {}".format(CAST))
+		else:
+			warn("Can't enable {} (not in DB)".format(CAST))
+	
+	elif CMD == "reset":
+		ID=resetpodcast(CAST)
+		if ID > 0:
+			warn("Reset {}".format(CAST))
+		else:
+			warn("Can't reset {} (not in DB)".format(CAST))
+	
+	elif CMD == "add":
+		ID=addpodcast(CAST)
+		if ID > 0:
+			warn("Added {} at ID {}".format(CAST,ID))
+		elif ID == 0:
+			warn("{} is already added".format(CAST))
+		elif ID < 0:
+			debug("Error adding {}".format(CAST))
+	
+	elif CMD == "fixpubdates":
+		for podshow in getpodcasts(CAST=CAST):
+			debug('''\nChecking ID={} URL={} TITLE={}'''.format(ID,URL,TITLE))
+			try:
+				fixpubdates(podshow)   #&
+			except Exception as e:
+				warn('''Error checking podcast {id} "{title}" ({url}): {e}\n{t}\nContinuing to next podcast.'''.format(id=ID, title=TITLE, url=URL,e=str(e), t=traceback.format_exc()))
+	
+	elif CMD == "update":
+		for podshow in getpodcasts(CAST=CAST):
+			debug('''\nChecking ID={} URL={} TITLE={}'''.format(podshow.castid, podshow.url, podshow.castname))
+			try:
+				checkpodcast(podshow)   #&
+			except Exception as e:
+				warn('''Error checking podcast {id} "{title}" ({url}): {e}\n{t}\nContinuing to next podcast.'''.format(id=podshow.castid, title=podshow.castname, url=podshow.url,e=str(e), t=traceback.format_exc()))
+			#JOBS=`jobs | wc -l`;
+			#if test "$JOBS" -ge "$PARANUM";then
+			#	test "$DEBUG" -gt 1 && echo "waiting for $JOBS jobs" >&2;
+			#	wait;
+			#	test "$DEBUG" -gt 1 && echo "done waiting" >&2;
+			#else
+			#	test "$DEBUG" -gt 1 && echo "need more jobs; have $JOBS" >&2;
+			#fi
+	elif CMD == "updatefeedurl":
+		podshow=fingerout(CAST)
+		updatefeedurl(podshow,NEWFEEDURL)
+	elif CMD == "list":
+		listcasts(LISTALL)
+	elif CMD == "download":
+		#downloadepisode (DLURL,".",None,"",0,DLURL)
+		warn("direct download is currently broken")
+	else:
+		warn(usage())
+	
+	exit(0)
