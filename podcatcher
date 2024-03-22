@@ -200,7 +200,7 @@ def getdbver():
 #}
 
 def usage():
-	return "Usage: {} [-hdqv] (add <podcastURL> | update | paraupdate [numprocs] | catchup | list | listall | updatecast <podcastURL> | catchupcast <podcastURL> | disable <podcastURL> | enable <podcastURL> | reset <podcastURL> | setddir <podcastdirectory> | checkdir | episodes [castURL] | checklock )".format(ME)
+	return "Usage: {} [-hdqv] [-p http://proxy-url/ ] (add <podcastURL> | update | paraupdate [numprocs] | catchup | list | listall | updatecast <podcastURL> | catchupcast <podcastURL> | disable <podcastURL> | enable <podcastURL> | reset <podcastURL> | setddir <podcastdirectory> | checkdir | episodes [castURL] | checklock )".format(ME)
 
 
 #getchanneltitle() {
@@ -2026,6 +2026,7 @@ if __name__ == "__main__":
 	LISTALL=False
 	DLURL=None
 	NEWFEEDURL=None
+	PROXY=None
 	try:
 		args=sys.argv[1:]
 	
@@ -2133,6 +2134,9 @@ if __name__ == "__main__":
 				VERBO=True
 			elif arg == "-q":
 				QUIET=True
+			elif arg == "-p":
+				PROXY = args[1]
+				args = args[1:]
 			else:
 				warn('''Unknown argument "{}"\n{}'''.format(arg,usage()))
 			args = args[1:]
@@ -2145,6 +2149,7 @@ if __name__ == "__main__":
 	debug("Number of parallel podcast checks is {}".format(PARANUM))
 	debug("Listall is {}".format(LISTALL))
 	debug("CAST is {}".format(CAST))
+	debug("PROXY is {}".format(PROXY))
 	
 	
 	# check / set up directory
@@ -2191,6 +2196,14 @@ if __name__ == "__main__":
 		exit(6)
 	debug("Changed directory to {}".format(OUTDIR))
 	
+	if PROXY is not None:
+		os.environ['http_proxy'] = os.environ['https_proxy'] = PROXY
+	debug("http_proxy is {}".format(os.environ.get('http_proxy')))
+	debug("https_proxy is {}".format(os.environ.get('https_proxy')))
+	debug("HTTP_PROXY is {}".format(os.environ.get('HTTP_PROXY')),l=2)
+	debug("HTTPS_PROXY is {}".format(os.environ.get('HTTPS_PROXY')), l=2)
+
+
 	if CMD == "episodes":
 		listepisodes(CAST)
 	
