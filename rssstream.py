@@ -177,13 +177,16 @@ class RssStreamParser(object):
 					chunk = oldchunk + chunk
 					oldchunk = None
 				try:
-					self.text += chunk.decode(self.charset)
+					chunk = chunk.decode(self.charset)
 				except UnicodeDecodeError as e:
 					if "unexpected end of data" in str(e):
 						oldchunk = chunk
 						continue
 					if self.verb: print("bad chunk in hex\n{}".format(chunk.hex()))
 					raise e
+				self.text += chunk
+				# NOTE: chunk was left as bytes for years, but recently the sax parser in feed() started choking on it if it had certain UTF characters (0xe28098 aka U+2018). 
+				#       so now we are converting chunk to string before feeding it to the parser
 				for i in self.feed(chunk):
 					yield i
 
@@ -253,7 +256,7 @@ if __name__ == "__main__":
 	from sys import argv
 	bbc = 'http://feeds.bbci.co.uk/news/world/rss.xml'
 
-	verb=False
+	verb=True
 	feed = None
 	if len(argv) > 1:
 		feed = argv[1]
