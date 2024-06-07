@@ -236,9 +236,9 @@ class RssStreamParser(object):
 			if self.raize:
 				raise RssParseException(e)
 			#raise RuntimeError("SAX parsing failed on {}".format(chunk))
+			if self.verb: print("error {} in feed for {}, skipping".format(e, self.url))
 			self.bail = True
 		if self.bail: 
-			if self.verb: print("error in feed for {}, skipping".format(self.url))
 			return
 		for i in self.elems:
 			yield i
