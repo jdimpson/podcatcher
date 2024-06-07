@@ -553,36 +553,44 @@ def title2filename (TITLE):
 	return TITLE
 
 
-def url2filename (URL,TITLE, preredirname=None):
+#def url2filename (URL,TITLE, preredirname=None):
+def url2filename (podep, preredirname=None):
 	# we use the pre-redirection name if the post-redirection name is dumb. Presumably the preredirname has already been through this process.
 	# sed -e 's/\xA0//g' -e "s/'//g" -e "s/%20/ /g" -e 's/\?.*$//' -e 's/&amp;/\&/' -e 's/[":]//g' -e "s/'//g" -e 's/\!//'`;
+
+	if preredirname is None:
+		URL = podep.url
+	else:
+		URL = podep.directed_url
+	TITLE=podep.title
+
 	fil = re.sub('\?.*$', '', URL)
 	fil=basename(fil)
 
 	f = re.sub(r'\.[^.]+$','',fil)
 	e = re.sub(r'^.*\.(.+?)$', r'\1', fil)
-	if re.search(r'^[0-9abcdef-]*$',f):
-		if preredirname is not None:
-			new = preredirname
+
+	if e is None:
+		if "mp3" in podep.type:
+			e="mp3"
 		else:
-			new = "{}.{}".format(title2filename(TITLE),e)
+			warn('''url2flename: unrecognized content type {} for file name, forcing mp3'''.format(podep.type))
+			e="mp3"
+	if preredirname is not None:
+		new = preredirname
+	else:
+		new = "{}.{}".format(title2filename(TITLE),e)
+	if re.search(r'^[0-9abcdef-]*$',f):
 		debug('''File name "{}" is stupid hash/uuid, using {} instead'''.format(fil, new))
 		fil = new
 	elif re.search(r'^media\.mp3$',fil) or re.search(r'^audio\.mp3$',fil) or re.search(r'^default_tc\.mp3$',fil) or re.search(r'^default\.mp3',fil) or re.search(r'^published\.mp3$',fil) or re.search(r'^stream\.mp3$',fil):
-		if preredirname is not None:
-			new = preredirname
-		else:
-			new = "{}.{}".format(title2filename(TITLE),e)
 		debug('''File name "{}" is generic, using {} instead'''.format(fil, new))
 		fil = new
 	elif re.search(r'^[0-9a-z]{28}$', fil):
-		if preredirname is not None:
-			new = preredirname
-		else:
-			# XXX: really need to rewrite all this code so needed info is available in an object
-			e="mp3"
-			new = "{}.{}".format(title2filename(TITLE),e)
 		debug('''File name "{}" is insipid, using {} instead'''.format(fil, new))
+		fil = new
+	elif len(fil) > 160:
+		debug('''File name "{}" is stupidly long, using {} instead'''.format(fil, new))
 		fil = new
 
 	fil=fil.replace('\n','')
@@ -1572,10 +1580,12 @@ class podcast_episode(object):
 	def makefile(self):
 		self.resolveurl()
 
-		fil=url2filename(self.url,self.title)
+		#fil=url2filename(self.url,self.title)
+		fil=url2filename(self)
 
 		if self.directed_url is not None:
-			directed_fil = url2filename(self.directed_url, self.title, preredirname=fil)
+			#directed_fil = url2filename(self.directed_url, self.title, preredirname=fil)
+			directed_fil = url2filename(self, preredirname=fil)
 			if directed_fil != fil:
 				debug("redirected url is {} => {}, redirected name {} => {}".format(self.url, self.directed_url, fil, directed_fil))
 			else:
