@@ -1901,6 +1901,28 @@ def checkpodcast(podshow):
 		else:
 			warn('''response text from {} was {}'''.format(podshow.url,r.text))
 			raise e
+	except requests.exceptions.ConnectionError as e:
+		warn('''{} response code was {} (checkpodcast ConnectionError)'''.format(podshow.url,r.resp.status_code))
+		podshow.mark_attempt(success=False)
+		carp = podshow.carp()
+		st = "failed attempts: {}".format(podshow.failedattempts())
+		if carp: warn(st)
+		else:   debug(st)
+		if "Read timed out" in str(e):
+			warn('''Connect timed out for {}'''.format(podshow.url))
+			return
+		else:
+			warn('''response text from {} was {}'''.format(podshow.url,r.text))
+			raise e
+	except Exception as e:
+		warn('''{} response code was {} (checkpodcast unrecognized Exception)'''.format(podshow.url,r.resp.status_code))
+		podshow.mark_attempt(success=False)
+		carp = podshow.carp()
+		st = "failed attempts: {}".format(podshow.failedattempts())
+		if carp: warn(st)
+		else:   debug(st)
+		warn('''response text from {} was {}'''.format(podshow.url,r.text))
+		raise e
 
 	itemcnt = len(items)
 	if itemcnt <=0:
