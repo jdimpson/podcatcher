@@ -4,7 +4,6 @@ RUN mkdir -p /root/.podcatcher/ && touch /root/.podcatcher/podcatcher.sqlite && 
 COPY basename.py /basename.py
 COPY rssstream.py /rssstream.py
 COPY podcatcher /podcatcher
-RUN chmod a+x /podcatcher 
-RUN /podcatcher -d setdir /podcasts
+RUN chmod a+x /podcatcher && /podcatcher -d setdir /podcasts
 ENTRYPOINT ["/podcatcher"]
 ARG ["help"]
