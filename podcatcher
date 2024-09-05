@@ -313,9 +313,6 @@ def is_redirect(r):
 
 def curl(URL,TMPFILE=None,allow_redirects=True):
 	barrier.wait()
-	#if 'feedburner' in URL or 'nightvalepresents' in URL or 'songonauts' in URL:
-	#	debug('''slowing down for feedburner''')
-	#	for c in range(20): barrier.wait()
 
 	# silent
 	# compressed
@@ -1613,15 +1610,25 @@ class podcast_file(object):
 
 		debug("downloading {} into {}/{}".format(self.podcast_episode.url,DIR,self.name))
 		# by repeating the request this time allowing redirects, we ensure that all the 302,303,301,307 differences are handled, EXCEPT that we can't handle a 301 which expect us to record the updated URL into the ID3 info, because this code needs to be restructured, and honestly it doesn't make any sense to do so in the ckntext of a file download.
-		r = curl(self.podcast_episode.url,tf, allow_redirects=True)
-
 		MSG="error downloading {} (downloadepisode); ".format(self.podcast_episode.url);
+		try:
+			r = curl(self.podcast_episode.url,tf, allow_redirects=True)
+		except Exception as e:
+			outcome = handle_requests_error(e,self.podcast_episode.url,othercontext=self.podcast_show)
+			MSG="{}, {}".format(MSG, e)
+			if "retries=" in outcome or outcome == "giveup":
+				r = None
+			elif outcome == "proceed":
+				r = None
+			elif outcome == "raise":
+				raise e
+
 		if r is None:
 			#case $ret in
 			#	47) MSG="$MSG, Too many redirects";;
 			#	*)  MSG="$MSG, curl returned $ret";;
 			#esac
-			warn(MSG + " response is empty")
+			warn(MSG + ", response is empty")
 
 			if os.stat(tf).st_size > 0:
 				debug("Keeping temporary file {}".format(tf))
