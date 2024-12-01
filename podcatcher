@@ -1693,6 +1693,9 @@ class podcast_file(object):
 			outfile = path.join(DIR, self.rename)
 			debug("blindly renamed to {} instead".format(outfile))
 			# still a race condition here, but I don't care.
+		if path.isfile(outfile):
+			raise RuntimeError("file name {} already exists, and duplicate detection didn't discover the fact: this is a bug".format(outfile))
+
 		try:
 			os.replace(tf, outfile)
 		except OSError as e:
