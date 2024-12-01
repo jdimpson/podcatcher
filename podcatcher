@@ -583,6 +583,9 @@ def url2filename (podep, preredirname=None):
 	elif re.search(r'^media\.mp3$',fil) or re.search(r'^audio\.mp3$',fil) or re.search(r'^default_tc\.mp3$',fil) or re.search(r'^default\.mp3',fil) or re.search(r'^published\.mp3$',fil) or re.search(r'^stream\.mp3$',fil):
 		debug('''File name "{}" is generic, using {} instead'''.format(fil, new))
 		fil = new
+	elif re.search(r'^original$', fil):
+		debug('''File name "{}" is stupid supercast, using {} instead'''.format(fil, new))
+		fil = new
 	elif re.search(r'^[0-9a-z]{28}$', fil):
 		debug('''File name "{}" is insipid, using {} instead'''.format(fil, new))
 		fil = new
@@ -1676,7 +1679,7 @@ class podcast_file(object):
 				self.name = fil
 				warn("Decoded name is {}.".format(self.name))
 			except ValueError as e:
-				warn("Decoding of {} failed. Carryin1 on...".format(self.name))
+				warn("Decoding of {} failed. Carrying on...".format(self.name))
 
 		outfile = path.join(DIR, self.name)
 		if path.isfile(outfile):
