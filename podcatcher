@@ -1682,6 +1682,7 @@ class podcast_file(object):
 				warn("Decoding of {} failed. Carrying on...".format(self.name))
 
 		outfile = path.join(DIR, self.name)
+		debug("checking if {} already exist".format(outfile))
 		if path.isfile(outfile):
 			debug("file {} exists".format(outfile))
 			SEC="{}-{}".format(MYPID, round(time.time()))
