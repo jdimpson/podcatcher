@@ -77,7 +77,8 @@ class RssStreamSaxHandler(xml.sax.handler.ContentHandler):
 		#print("{} content={}".format(self.tagstack,content))
 
 class RssStreamParser(object):
-	def __init__(self,url, text=None, resp=None, type=None, verb=False, ua=None, timeout=None, raize=False):
+	def __init__(self,url, text=None, resp=None, type=None, verb=False, ua=None, timeout=None, raize=False, verify=True):
+		self.verify = verify
 		self.bail = False
 		self.raize = raize
 		self.verb = verb
@@ -101,7 +102,7 @@ class RssStreamParser(object):
 			self.text = ''
 			self.check_resp()
 		else:
-			self.resp = requests.get(self.url,stream=True,headers=hd,timeout=timeout)
+			self.resp = requests.get(self.url,stream=True,headers=hd,timeout=timeout,verify=self.verify)
 			self.text = ''
 			self.check_resp()
 

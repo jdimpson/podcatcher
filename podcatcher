@@ -90,6 +90,7 @@ PARANUM=1
 UA = "{}/{}".format(ME,VER)
 #UA = "Mozilla/5.0 (Android 10; Mobile; rv:122.0) Gecko/122.0 Firefox/122.0"
 RTIMEOUTS=(60,60)
+VERIFY=True
 
 conn = sqlite3.connect(PODDB)
 
@@ -322,7 +323,7 @@ def curl(URL,TMPFILE=None,allow_redirects=True):
 	hd = { 'User-Agent': UA, }
 
 	#try:
-	r = requests.get(URL, headers=hd, stream=True,allow_redirects=allow_redirects,timeout=RTIMEOUTS)
+	r = requests.get(URL, headers=hd, stream=True,allow_redirects=allow_redirects,timeout=RTIMEOUTS, verify=VERIFY)
 	#except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as e:
 	#	debug("curl {} received error {} {}; returning None".format(URL,type(e),e))
 	#	return None
@@ -362,7 +363,7 @@ def get_channel_image(URL):
 
 def get_channel(URL, key):
 	barrier.wait()
-	r = RssStreamParser(URL,ua=UA,timeout=RTIMEOUTS,verb=(DEBUG>1))
+	r = RssStreamParser(URL,ua=UA,timeout=RTIMEOUTS,verb=(DEBUG>1),verify=VERIFY)
 	val  = None
 	attr = None
 	try:
