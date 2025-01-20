@@ -649,7 +649,10 @@ def markdownloaded (show,ep):
 	debug("{},{}".format(sql,args),l=1)
 	with conn:
 		c=conn.cursor()
-		c.execute(sql,args)
+		try:
+			c.execute(sql,args)
+		except sqlite3.IntegrityError as e:
+			warn(e)
 
 
 
