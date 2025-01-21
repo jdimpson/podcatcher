@@ -171,10 +171,6 @@ def getdbver():
 			c.execute('select * from schemaver;')
 			return c.fetchone()[0]
 	except sqlite3.OperationalError as e:
-		#if "no such table: schemaver" in e.args:
-		#	makepoddbV2()
-		#	return getdbver() # nothing could possibly go wrong
-		#else:
 		return 0
 
 #rssscrub() {
@@ -203,10 +199,6 @@ def getdbver():
 def usage():
 	return "Usage: {} [-hdqv] [-p http://proxy-url/ ] (add <podcastURL> | update | paraupdate [numprocs] | catchup | list | listall | updatecast <podcastURL> | catchupcast <podcastURL> | disable <podcastURL> | enable <podcastURL> | reset <podcastURL> | setddir <podcastdirectory> | checkdir | episodes [castURL] | checklock )".format(ME)
 
-
-#getchanneltitle() {
-#	sed -n -e '1,/(item/p' | sed -n -e '/(image/,/)image/!p' | sed -n -e '/(title/,/)title/p' | grep -v '^[)(]title$' | sed -e 's/^-//' | sed -e ':a;N;$!ba;s/\n//g'
-#}
 
 def isrss (b):
 	o = magic.from_buffer(b)
@@ -474,7 +466,6 @@ def listcasts(LISTALL):
 	for podshow in getpodcasts(ALL=LISTALL):
 		print(podshow.castid,podshow.url,podshow.castname)
 
-
 def seen(show,ep):
 	numseen = None
 	SQL="select count(*) from episodes where castid = ? and epguid = ? and status = 'Downloaded';"
@@ -490,59 +481,25 @@ def seen(show,ep):
 	if numseen > 0:
 		#print("seen",show.castid,ep.guid)
 		return True
-	#if oldseen(show.castid,ep):
-	#	print("oldseen",show.castid,ep.guid)
-	#	return True
 	#print("unseen",show.castid,ep.guid)
 	return False
 
-def oldseen(ID,ep):
-	numseen = None
-	if ep.url is None or ep.url == '':
-		SQL="select count(*) from episodes where castid = ? and epurl is null and status = 'Downloaded';"
-		args = (ID,)
-	else:
-		SQL="select count(*) from episodes where castid = ? and epurl = ? and status = 'Downloaded';"
-		args = (ID, ep.url,)
-	debug("seen SQL: {}({})".format(SQL,args),l=1)
-	with conn:
-		c = conn.cursor()
-		c.execute(SQL,args)
-		numseen = c.fetchone()[0]
-	if numseen is None:
-		warn("DB error: numseen is empty: {}".format(SQL))
-		exit(7)
-	if numseen > 0:
-		SQL="update episodes set epguid = ? where castid = ? and epurl = ? and status = 'Downloaded';"
-		args = (ep.guid, ID, ep.url,)
-		with conn:
-			c = conn.cursor()
-			c.execute(SQL,args)
-		return True
-	return False
-
-
 def title2filename (TITLE):
-	# sed -e 's/\xA0//g' -e "s/'//g" -e 's/://g' -e 's/\!//g' -e 's/\///'
 	removes = [ u"\u00A0", "'", ":", "!", "/", ]
-	# sed -e "s/\xC2\xBB/-/g" 
 	todash  = [ u"\uC2BB", ]
 	for r in removes:
 		TITLE=TITLE.replace(r,"")
 	for d in todash:
 		TITLE=TITLE.replace(d,"-")
 
-	# sed -e 's/\?.*$//'
 	# remove question marks and everything after them
 	if "?" in TITLE:
 		TITLE=TITLE[:TITLE.find("?")+1]
 
-	# sed -e 's/^-//' -e 's/^ *//' 
 	leads = ["-", " ",]
 	for l in leads:
 		while TITLE[0] == l:
 			TITLE=TITLE[1:]
-	# sed -e 's/ *$//' 
 	ends = [ " ", ]
 	for e in ends:
 		while TITLE[-1] == e:
@@ -550,11 +507,8 @@ def title2filename (TITLE):
 
 	return TITLE
 
-
-#def url2filename (URL,TITLE, preredirname=None):
 def url2filename (podep, preredirname=None):
 	# we use the pre-redirection name if the post-redirection name is dumb. Presumably the preredirname has already been through this process.
-	# sed -e 's/\xA0//g' -e "s/'//g" -e "s/%20/ /g" -e 's/\?.*$//' -e 's/&amp;/\&/' -e 's/[":]//g' -e "s/'//g" -e 's/\!//'`;
 
 	if preredirname is None:
 		URL = podep.url
@@ -654,12 +608,6 @@ def markdownloaded (show,ep):
 		except sqlite3.IntegrityError as e:
 			warn("Failed to mark episode as downloaded: {}".format(e))
 
-
-
-# don't need this no more!
-#def id3override (ID,CAST):
-#	pass
-
 def updateid3(podfile):
 	FILE,ID,CAST,EPISODE,DATE,TYPE, DESCR, URL, RSSURL, ovr = \
 	podfile.file,podfile.podcast_show.castid,podfile.podcast_show.castname,podfile.podcast_episode.title,podfile.podcast_episode.pubdate,podfile.podcast_episode.type,podfile.podcast_episode.description,podfile.podcast_episode.url,podfile.podcast_show.url,podfile.podcast_show.getid3policy()
@@ -727,7 +675,6 @@ def updateid3_mp4(podfile):
 			elif r.content is None or r.content == b'':
 				warn("Download of image url {} yielded no content".format(imgurl))
 			else:
-				#try:
 				typ=mutagen.mp4.AtomDataType.JPEG
 				if   "image/jpeg" in r.headers['Content-Type'].lower():
 					typ=mutagen.mp4.AtomDataType.JPEG
@@ -936,7 +883,6 @@ File {} can't be parsed by eyeD3
 		tag.user_url_frames.set(podfile.podcast_episode.link.encode(), "link")
 		debug("Set user URL 'link' to {}".format(podfile.podcast_episode.link))
 
-	#if tag.getBestDate() is None or ovr:
 	if OVERWRITE_ORIG_RELEASE_DATE or tag.original_release_date is None or ovr:
 		tag.original_release_date = eyed3.core.Date.parse(DATE.replace(tzinfo=None).replace(microsecond=0).isoformat())
 		debug("Set Date/Year to {}".format(str(tag.original_release_date)))
@@ -1046,10 +992,6 @@ File {} can't be parsed by eyeD3
 		else:
 			warn('''"{}" having a bad time'''.format(podfile.file))
 			raise e
-
-# don't need this no more!
-#def needsid3tag(TAG,FILE):
-#	pass
 
 def display_item_text(url,date,title,description):
 	print("item from {}".format(url))
@@ -1454,16 +1396,6 @@ class podcast_episode(object):
 		self.podcast_show = podcast_show
 		self.pubdate = i['pubDate']['content']
 		if isinstance(self.pubdate,str):
-			#if   "PDT" in self.pubdate or "PST" in self.pubdate:
-			#	#PAC=tz.gettz("America/Los_Angeles")
-			#	PST="PST+8"
-			#	PDT="PST+7"
-			#	self.pubdate = dateutil.parser.parse(self.pubdate, tzinfos={"PDT":PDT, "PST":PST})
-			#elif "CDT" in self.pubdate or "CST" in self.pubdate:
-			#	CDT="CDT+5"
-			#	CST="CST+6"
-			#	self.pubdate = dateutil.parser.parse(self.pubdate, tzinfos={"CDT":CDT, "CST":CST})
-			#else:
 			self.pubdate = dateutil.parser.parse(self.pubdate, tzinfos=whois_timezone_info)
 
 		self.title   = i['title']['content']
@@ -1590,11 +1522,9 @@ class podcast_episode(object):
 	def makefile(self):
 		self.resolveurl()
 
-		#fil=url2filename(self.url,self.title)
 		fil=url2filename(self)
 
 		if self.directed_url is not None:
-			#directed_fil = url2filename(self.directed_url, self.title, preredirname=fil)
 			directed_fil = url2filename(self, preredirname=fil)
 			if directed_fil != fil:
 				debug("redirected url is {} => {}, redirected name {} => {}".format(self.url, self.directed_url, fil, directed_fil))
@@ -1853,7 +1783,7 @@ def checkpodcast(podshow):
 			if unbroken:
 				debug("We should permanently update RSS URL from {} to {}".format(last_url,h.url))
 			else:
-				# so apparently this is ok, because some feed hosts permanantly use temporary redirects to map from a vanity (e.g. podcast.provider1.com) hostname to a non-vanity one (www.provider1.com/podcast), but then if the podcast found another hosting service, the permanent redirect will come from the non-vanity host, after the temororary redirect.
+				# so apparently this is ok, because some feed hosts permanantly use temporary redirects to map from a vanity (e.g. podcast.provider1.com) hostname to a non-vanity one (www.provider1.com/podcast), but then if the podcast found another hosting service, the permanent redirect will come from the non-vanity host, after the temporary redirect.
 				warn("Received a permanent redirect after a temporary redirect! OK, I guess.")
 			updatefeedurl(podshow,h.url)
 			podshow.url = h.url
@@ -1965,7 +1895,6 @@ def checkpodcast(podshow):
 	debug("Found {} items in RSS".format(itemcnt))
 	podshow.mark_attempt(success=True)
 
-	# $SEL -t -m "item" -v "pubDate" -o "|" -v "title" -m "enclosure[1]" -o "|" -v "@type" -o "|" -v "@length" -o "|" -v "@url" -b -n 
 	for i in items:
 
 		ep = podcast_episode(i, podcast_show=podshow)
@@ -1974,7 +1903,6 @@ def checkpodcast(podshow):
 			continue
 		if CATCHUP:
 			warn("skipping download of {} ({}) due to catchup command".format(ep.title,ep.url))
-			#markdownloaded(podshow.castid, ep.url, ep.title, ep.type, ep.length)
 			markdownloaded(podshow, ep)
 			continue
 		else:
@@ -2006,7 +1934,6 @@ def checkpodcast(podshow):
 
 			if isitafile:
 				print('''Downloaded "{}" episode "{}" ({}) to "{}"'''.format(podshow.castname, ep.title, ep.url,podfile.file))
-				#markdownloaded(podshow.castid, ep.url, ep.title, ep.type, ep.length)
 				markdownloaded(podshow, ep)
 			else:
 				print('''Failed to download {} episode {} ("{}")'''.format(TITLE, ep.title, ep.url))
@@ -2066,7 +1993,6 @@ if __name__ == "__main__":
 		exit(9)
 
 	atexit.register(guido)
-	#trap 'wait; test $DEBUG -gt 0 && echo "$ME exiting" >&2; for i in $TEMPLATE-*; do rm -f "$i";test $DEBUG -gt 2 && echo "deleting $i" >&2; done;' EXIT
 
 	LOCK = os.open(sys.argv[0],os.O_RDONLY)
 	try:
