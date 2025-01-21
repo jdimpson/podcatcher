@@ -652,7 +652,7 @@ def markdownloaded (show,ep):
 		try:
 			c.execute(sql,args)
 		except sqlite3.IntegrityError as e:
-			warn(e)
+			warn("Failed to mark episode as downloaded: {}".format(e))
 
 
 
@@ -677,7 +677,7 @@ def updateid3(podfile):
 	else:
 		warn("{} is type {}, can't handle it, so not checking ID3 info".format(FILE,TYPE))
 		#debug("{} is type {}, can't handle it, so not checking ID3 info".format(FILE,TYPE))
-		return updateid3_save(podfile)
+		return updateid3_savefile(podfile)
 
 def updateid3_mp4(podfile):
 	FILE,ID,CAST,EPISODE,DATE,TYPE, DESCR, URL, RSSURL, ovr = \
@@ -809,10 +809,21 @@ touch -t $TIME {mp3_file};
 exit 0;
 '''.format(**fmtargs)
 
-def updateid3_save(podfile):
-	txt_file = re.sub(r'\.[^.]+$','',podfile.file) + ".txt"
+def updateid3_savefile(podfile):
+	# save text of RSS Item
+	updateid3_saveitem(podfile.podcast_episode, podfile.file)
+
+	# write out script to use to try to create the intended audio file plus metatdata
+	shell_file = re.sub(r'\.[^.]+$','',podfile.file) + ".sh"
+	warn("Writing id3 script to {}".format(shell_file))
+	scr = encid3scr(podfile)
+	with open(shell_file,"w") as f:
+		f.write(scr)
+
+def updateid3_saveitem(podep, filename):
+	txt_file = re.sub(r'\.[^.]+$','',filename) + ".txt"
 	warn("Writing id3 text info to {}".format(txt_file))
-	IMAGEURL = get_channel_image(podfile.podcast_show.url)
+	IMAGEURL = get_channel_image(podep.podcast_show.url)
 	txt ='''File {FILE}
 ID {ID}
 CAST/ALBUM {CAST}
@@ -823,15 +834,10 @@ DESCR {DESCR}
 URL {URL}
 RSSURL {RSSURL}
 IMAGEURL {IMAGEURL}
-'''.format(FILE=podfile.file, ID=podfile.podcast_show.castid, CAST=podfile.podcast_show.castname, EPISODE=podfile.podcast_episode.title, DATE=podfile.podcast_episode.pubdate, TYPE=podfile.podcast_episode.type, DESCR=podfile.podcast_episode.description, URL=podfile.podcast_episode.url, RSSURL=podfile.podcast_show.url, IMAGEURL=IMAGEURL)
+'''.format(FILE=filename, ID=podep.podcast_show.castid, CAST=podep.podcast_show.castname, EPISODE=podep.title, DATE=podep.pubdate, TYPE=podep.type, DESCR=podep.description, URL=podep.url, RSSURL=podep.podcast_show.url, IMAGEURL=IMAGEURL)
 	with open(txt_file,"w") as f:
 		f.write(txt)
 
-	shell_file = re.sub(r'\.[^.]+$','',podfile.file) + ".sh"
-	warn("Writing id3 script to {}".format(shell_file))
-	scr = encid3scr(podfile)
-	with open(shell_file,"w") as f:
-		f.write(scr)
 
 # really should monitor the size of this
 geturlimg_cache = {}
@@ -909,7 +915,7 @@ def updateid3_mp3(podfile,maxres=(15000,15000),resizeres=(5000,5000)):
 				warn('''
 File {} can't be parsed by eyeD3
 '''.format(podfile.file))
-				return updateid3_save(podfile)
+				return updateid3_savefile(podfile)
 			else : raise(e)
 		tag=audiofile.tag
 
@@ -1973,14 +1979,13 @@ def checkpodcast(podshow):
 			continue
 		else:
 			ep.analyse(conn)
-			if ep.enclosure is None:
-				warn("No enclosure in RSS feed item from {}. Skipping after these details:.".format(podshow.url))
+			title_file = re.sub(r'\W+','',ep.title) + ".txt"
+			if ep.enclosure is None or ep.url is None or ep.type is None:
+				if ep.url  is None: ep.url = "none"
+				if ep.type is None: ep.type = "none"
+				warn("No enclosure in RSS feed item, or no URL in enclosure, or no Enctype in enclosure, from {}. Skipping after these details:.".format(podshow.url))
 				display_item_text(podshow.url,ep.pubdate,ep.title,ep.description)
-				markdownloaded(podshow, ep)
-				continue
-			if ep.url is None:
-				debug("no url found in enclosure {} {}".format(ep.title, ep.pubdate))
-				display_item_text(podshow.url,ep.pubdate,ep.title,ep.description)
+				updateid3_saveitem(ep, title_file)
 				markdownloaded(podshow, ep)
 				continue
 
