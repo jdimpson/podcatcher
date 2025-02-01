@@ -350,7 +350,7 @@ def get_channel_image(URL):
 		f = get_channel(URL, '/rss/channel/itunes:image')
 		if f is None:
 			warn("not rss feed image found")
-		if 'href' in f:
+		elif 'href' in f:
 			f = f['href']
 	return f
 
@@ -694,7 +694,9 @@ def updateid3_mp4(podfile):
 			tag['covr'].append(mp4covr)
 			debug("Cover art added. {} images total".format(len(tag['covr'])))
 		else:
-			debug("No new Cover art added. {} images total".format(len(tag['covr'])))
+			if 'covr' in tag: cnt=len(tag['covr'])
+			else: cnt=0
+			debug("No new Cover art added. {} images total".format(cnt))
 
 	#if tag.audio_file_url is None or ovr:
 	#	tag.audio_file_url = URL.encode('utf-8')
@@ -1015,7 +1017,10 @@ def handle_requests_error(e, URL, retries=3, othercontext=None):
 	if isinstance(e, requests.HTTPError):
 		c =  e.response.status_code
 		if c == 404:
-			if carp: warn ("File Not Found when downloading {}".format(URL))
+			if carp: warn ("File Not Found (404) when downloading {}".format(URL))
+			return "giveup"
+		elif c == 403:
+			if carp: warn ("File Forbidden (403) when downloading {}".format(URL))
 			return "giveup"
 	elif isinstance(e, requests.exceptions.ReadTimeout):
 		if "Connection to " in str(e) and " timed out" in str(e):
