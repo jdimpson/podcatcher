@@ -324,6 +324,7 @@ def curl(URL,TMPFILE=None,allow_redirects=True):
 		debug("curl got {} redirect for {}, but told not to follow redirect to {}".format(r.status_code, URL, r.headers['location']))
 		return r
 
+	r.raise_for_status()
 
 	if TMPFILE is not None:
 		with open(TMPFILE,'wb') as o:
@@ -1010,8 +1011,13 @@ def handle_requests_error(e, URL, retries=3, othercontext=None):
 			carp = True
 	else:
 		carp = True
-	#requests.Timeout, requests.HTTPError
-	if isinstance(e, requests.exceptions.ReadTimeout):
+	#requests.Timeout, 
+	if isinstance(e, requests.HTTPError):
+		c =  e.response.status_code
+		if c == 404:
+			if carp: warn ("File Not Found when downloading {}".format(URL))
+			return "giveup"
+	elif isinstance(e, requests.exceptions.ReadTimeout):
 		if "Connection to " in str(e) and " timed out" in str(e):
 			if carp: warn ("timed out while connecting to {}".format(URL))
 		elif "ConnectionPool" in str(e) and "Read timed out" in str(e):
@@ -1509,10 +1515,11 @@ class podcast_episode(object):
 		try:
 			r = curl(self.url, allow_redirects=False)
 		except Exception as e:
+			debug("exception resolving {}, handling".format(self.url))
 			outcome = handle_requests_error(e,self.url)
 			if "retries=" in outcome or outcome == "giveup":
-				#return None
-				raise e
+				return None
+				#raise e
 			elif outcome == "proceed":
 				pass
 			elif outcome == "raise":
@@ -1560,6 +1567,7 @@ class podcast_file(object):
 		try:
 			r = curl(self.podcast_episode.url,tf, allow_redirects=True)
 		except Exception as e:
+			debug("exception downloading {} to {}, handling".format(self.podcast_episode.url,tf))
 			outcome = handle_requests_error(e,self.podcast_episode.url,othercontext=self.podcast_show)
 			MSG="{}, {}".format(MSG, e)
 			if "retries=" in outcome or outcome == "giveup":
@@ -1926,20 +1934,21 @@ def checkpodcast(podshow):
 			if NEWFILE is not None:
 				debug("Downloaded {}".format(podfile.file),l=1)
 				podfile.normalize(tzo=LOCALTZ)
+				try: # if there's an error THEN GUESS WHAT IT'S NOT A FILE
+					isitafile = path.isfile(podfile.file)
+				except Exception as e:
+					warn('''Got error "{}" when checking for new file "{}", so it's probably not a file'''.format(e,podfile.file))
+					isitafile = False
 			else:
 				debug("Failed to receive filename from downloadepisode")
-
-			try: # if there's an error THEN GUESS WHAT IT'S NOT A FILE
-				isitafile = path.isfile(podfile.file)
-			except Exception as e:
-				warn('''Got error "{}" when checking for new file "{}", so it's probably not a file'''.format(e,podfile.file))
 				isitafile = False
+
 
 			if isitafile:
 				print('''Downloaded "{}" episode "{}" ({}) to "{}"'''.format(podshow.castname, ep.title, ep.url,podfile.file))
 				markdownloaded(podshow, ep)
 			else:
-				print('''Failed to download {} episode {} ("{}")'''.format(TITLE, ep.title, ep.url))
+				print('''Failed to download {} episode {} ("{}")'''.format(podshow.castname, ep.title, ep.url))
 				# XXX: do "markdownloaderror" here
 
 def setdir(DIR):
