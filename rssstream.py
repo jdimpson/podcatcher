@@ -17,11 +17,11 @@ def oldest2newest(rss):
 
 def ct2type(ct):
 	typ = None
-	if "/atom+xml" in ct:
+	if "atom+xml" in ct:
 		typ = "atom"
-	elif "/xml" in ct:
+	elif "xml" in ct:
 		typ = "rss"
-	elif "/rss+xml" in ct:
+	elif "rss+xml" in ct:
 		typ = "rss"
 	elif "application/octet-stream" in ct:
 		typ = "octets"
