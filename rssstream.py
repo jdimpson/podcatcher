@@ -15,6 +15,7 @@ def newest2oldest(rss):
 def oldest2newest(rss):
 	return datesort(rss, False)
 
+# TODO: if a channel has an atom:link tag, it might have a type attribute
 def ct2type(ct):
 	typ = None
 	if "atom+xml" in ct:
