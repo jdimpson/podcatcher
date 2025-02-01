@@ -631,8 +631,11 @@ def updateid3_mp4(podfile):
 	FILE,ID,CAST,EPISODE,DATE,TYPE, DESCR, URL, RSSURL, ovr = \
 	podfile.file,podfile.podcast_show.castid,podfile.podcast_show.castname,podfile.podcast_episode.title,podfile.podcast_episode.pubdate,podfile.podcast_episode.type,podfile.podcast_episode.description,podfile.podcast_episode.url,podfile.podcast_show.url,podfile.podcast_show.getid3policy()
 	audiofile = mutagen.File(FILE)
-	tag = audiofile.tags
 	# https://mutagen.readthedocs.io/en/latest/api/mp4.html
+	try:
+		tag = audiofile.tags
+	except:
+		tag = None
 
 	if tag is None:
 		debug("No MP4 ID3 tags found; creating them!")
