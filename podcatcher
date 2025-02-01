@@ -1018,10 +1018,13 @@ def handle_requests_error(e, URL, retries=3, othercontext=None):
 		c =  e.response.status_code
 		if c == 404:
 			if carp: warn ("File Not Found (404) when downloading {}".format(URL))
-			return "giveup"
 		elif c == 403:
 			if carp: warn ("File Forbidden (403) when downloading {}".format(URL))
-			return "giveup"
+		elif c == 500:
+			if carp: warn ("Server Error (500) when downloading {}".format(URL))
+		else:
+			warn("HTTP Error ({}) when downloading {}".format(c, URL))
+		return "giveup"
 	elif isinstance(e, requests.exceptions.ReadTimeout):
 		if "Connection to " in str(e) and " timed out" in str(e):
 			if carp: warn ("timed out while connecting to {}".format(URL))
