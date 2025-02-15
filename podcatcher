@@ -240,7 +240,7 @@ def fingerout(URL):
 		else:
 			sql = "select castid,castname,feedurl from podcasts where feedurl = ?;" 
 			args =(URL,)
-		debug("figuring out podcast with sql {} and args {}".format(sql,args))
+		debug("figuring out podcast with sql {} and args {}".format(sql,args),1)
 		c.execute(sql,args)
 		tmp = c.fetchone()
 		if tmp is not None: 
@@ -487,7 +487,7 @@ def seen(show,ep):
 	return False
 
 def title2filename (TITLE):
-	removes = [ u"\u00A0", "'", ":", "!", "/", ]
+	removes = [ u"\u00A0", "'", ":", "!", "/", "?"]
 	todash  = [ u"\uC2BB", ]
 	for r in removes:
 		TITLE=TITLE.replace(r,"")
@@ -495,8 +495,8 @@ def title2filename (TITLE):
 		TITLE=TITLE.replace(d,"-")
 
 	# remove question marks and everything after them
-	if "?" in TITLE:
-		TITLE=TITLE[:TITLE.find("?")+1]
+	#if "?" in TITLE:
+	#	TITLE=TITLE[:TITLE.find("?")+1]
 
 	leads = ["-", " ",]
 	for l in leads:
