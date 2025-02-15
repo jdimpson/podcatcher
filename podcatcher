@@ -240,6 +240,7 @@ def fingerout(URL):
 		else:
 			sql = "select castid,castname,feedurl from podcasts where feedurl = ?;" 
 			args =(URL,)
+		debug("figuring out podcast with sql {} and args {}".format(sql,args))
 		c.execute(sql,args)
 		tmp = c.fetchone()
 		if tmp is not None: 
@@ -390,7 +391,7 @@ def addpodcast(URL):
 		ID = show.castid
 
 		if ID is not None:
-			debug("{} was already in database".format(URL))
+			debug("{} was already in database as ID {}".format(URL, ID))
 			c.execute("select pcenabled from podcasts where feedurl = ?;", (URL,))
 			EN = c.fetchone()
 			if EN == 0:
@@ -400,7 +401,7 @@ def addpodcast(URL):
 		c.execute("select castid from podcasts where origfeedurl = ?;", (URL,))
 		tmp = c.fetchone()
 		if tmp is not None:
-			debug("{} was already in database (as outdated original feed URL)".format(URL))
+			debug("{} was already in database (as outdated original feed URL), ID {}".format(URL, ID))
 			return 0
 		
 		debug("{} is new, adding to a database".format(URL))
