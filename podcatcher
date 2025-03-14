@@ -529,7 +529,7 @@ def url2filename (podep, preredirname=None):
 		URL = podep.directed_url
 	TITLE=podep.title
 
-	fil = re.sub('\?.*$', '', URL)
+	fil = re.sub(r'\?.*$', '', URL)
 	fil=basename(fil)
 
 	f = re.sub(r'\.[^.]+$','',fil)
@@ -750,7 +750,7 @@ def encid3scr(podfile, wavfile=None, mp3file=None, lameopts=None):
 	#fmtargs['date'] = quote(podfile.podcast_episode.pubdate.replace(tzinfo=None).replace(microsecond=0).isoformat())
 	fmtargs['date'] = quote(podfile.podcast_episode.pubdate.replace(microsecond=0).isoformat())
 	fmtargs['description'] = quote(podfile.podcast_episode.description)
-	fmtargs['description'] = fmtargs['description'].replace(':','\:')
+	fmtargs['description'] = fmtargs['description'].replace(':','\\:')
 	fmtargs['episodeurl'] = quote(podfile.podcast_episode.url)
 	fmtargs['feedurl'] = quote(podfile.podcast_show.url)
 	fmtargs['title'] = quote(podfile.podcast_episode.title)
