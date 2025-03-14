@@ -14,6 +14,7 @@ import stat
 import time
 import atexit
 import sqlite3
+import datetime
 import requests
 import tempfile
 import traceback
@@ -102,6 +103,40 @@ DEFAULT_HEADERS = {
 	'Accept-Encoding': "gzip, deflate",
 	'Dnt': "1",
 }
+
+# from https://docs.python.org/3/library/sqlite3.html#sqlite3-adapter-converter-recipes
+#def adapt_date_iso(val):
+#    """Adapt datetime.date to ISO 8601 date."""
+#    return val.isoformat()
+#sqlite3.register_adapter(datetime.date, adapt_date_iso)
+
+# XXX: the pre-python 3.12 now-deprecated default behavior used a space between the date and time.
+# XXX: and that's what the sqlite3 builtin datetime() function does, too
+# XXX: originally this code, taken from the python 3.12 documentation for sqlite3, uses a T to separate date and time.
+def adapt_datetime_iso(val):
+    """Adapt datetime.datetime to timezone-naive (or not?) ISO 8601 date."""
+    return val.isoformat().replace('T',' ')
+sqlite3.register_adapter(datetime.datetime, adapt_datetime_iso)
+
+#def adapt_datetime_epoch(val):
+#    """Adapt datetime.datetime to Unix timestamp."""
+#    return int(val.timestamp())
+#sqlite3.register_adapter(datetime.datetime, adapt_datetime_epoch)
+
+#def convert_date(val):
+#    """Convert ISO 8601 date to datetime.date object."""
+#    return datetime.date.fromisoformat(val.decode())
+#sqlite3.register_converter("date", convert_date)
+
+def convert_datetime(val):
+    """Convert ISO 8601 datetime to datetime.datetime object."""
+    return datetime.datetime.fromisoformat(val.decode().replace(' ','T'))
+sqlite3.register_converter("datetime", convert_datetime)
+
+#def convert_timestamp(val):
+#    """Convert Unix epoch timestamp to datetime.datetime object."""
+#    return datetime.datetime.fromtimestamp(int(val))
+#sqlite3.register_converter("timestamp", convert_timestamp)
 
 conn = sqlite3.connect(PODDB)
 
