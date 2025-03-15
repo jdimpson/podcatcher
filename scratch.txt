@@ -1,0 +1,22 @@
+
+
+IMAGEURL="https\\://static.libsyn.com/p/assets/7/b/8/e/7b8eb925ee43864d/avatars-000267349328-yzwuey-original.jpg"
+IMAGEFILE="cover.jpg"
+curl "$IMAGEURL" > "$IMAGEFILE";
+
+PODCASTTITLE="some podcast";
+FEEDURL=https://feeds.libsyn.com/XXXXXX/rss
+
+for i in *.mp3; do 
+	ORD="$(stat -c '%y' "$i" | sed -e 's/ /T/' -e 's/\.000000000 .*//')"
+	# untested ORD="$(date --iso-8601=seconds --date="$(stat -c '%y' "$i")" | sed -e 's/[+-][^+-]*$/')"
+	eyeD3 --preserve-file-times --album "$PODCASTTITLE" \
+		--url-frame WOAS:"$FEEDURL" \
+		--orig-release-date "$ORD" \
+		--add-image "$IMAGEFILE":OTHER:"$IMAGEURL" \
+		--add-image "$IMAGEURL":OTHER:'RSS link' \
+		"$i"; 
+done 
+
+
+date --iso-8601=seconds --date="$(stat -c '%y' "$i")"
