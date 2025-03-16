@@ -20,3 +20,6 @@ done
 
 
 date --iso-8601=seconds --date="$(stat -c '%y' "$i")"
+
+
+for i in *.mp3; do COMM=$(mid3v2 "$i" | grep 'COMM=RSS=eng=' | sed -e 's/COMM=RSS=eng=//'); COMM=$(echo "$COMM" | sed -e s/\"/\'/g -e 's/:/\\\:/g'); echo eyeD3 --preserve-file-times --add-comment '"'"$COMM"'"':RSS $i; done > /media/audio/spines/comms.sh
