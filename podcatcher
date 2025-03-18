@@ -405,7 +405,18 @@ def get_channel_image(URL):
 
 def get_channel(URL, key):
 	barrier.wait()
-	r = RssStreamParser(URL,headers=DEFAULT_HEADERS,timeout=RTIMEOUTS,verb=(DEBUG>1),verify=VERIFY)
+	r = None
+	try:
+		r = RssStreamParser(URL,headers=DEFAULT_HEADERS,timeout=RTIMEOUTS,verb=(DEBUG>1),verify=VERIFY)
+	except Exception as e:
+		outcome = handle_requests_error(e,URL)
+		if "retries=" in outcome or outcome == "giveup":
+			return None
+			pass
+		elif outcome == "proceed":
+			pass
+		elif outcome == "raise":
+			raise e
 	val  = None
 	attr = None
 	try:
@@ -459,6 +470,9 @@ def addpodcast(URL):
 	debug("Title of {} is {}".format(URL, title))
 	# sqlescape?
 
+	if title is None:
+		warn("No title acquired for {}, won't subscribe".format(URL))
+		return -1
 	with conn:
 		c = conn.cursor()
 		c.execute("insert into podcasts (castname,feedurl) values (?,?);", (title, URL))
@@ -2314,7 +2328,7 @@ if __name__ == "__main__":
 		elif ID == 0:
 			warn("{} is already added".format(CAST))
 		elif ID < 0:
-			debug("Error adding {}".format(CAST))
+			warn("Error adding {}".format(CAST))
 	
 	elif CMD == "fixpubdates":
 		for podshow in getpodcasts(CAST=CAST):
