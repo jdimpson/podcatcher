@@ -1088,6 +1088,32 @@ def handle_requests_error(e, URL, retries=3, othercontext=None):
 			r='retries={}'.format(retries-1)
 			if carp: warn(r)
 			return r
+	elif isinstance(e, requests.exceptions.ProxyError):
+		# Unrecognized ConnectionError on https://escapepod.org/feed/: HTTPSConnectionPool(host='escapepod.org', port=443): Max retries exceeded with url: /feed/ (Caused by ProxyError('Cannot connect to proxy.', OSError('Tunnel connection failed: 500 Unable to connect')))
+		if "Tunnel connection failed" in str(e):
+			# gosh it would be nice to have the original error objects
+			s=str(e)
+			m = s
+			i = s.find("Tunnel connection failed")
+			if i:
+				s = s[i:]
+				i = s.find(":")
+				if i:
+					s = s[i+1:]
+					i = s.find("'")
+					if i:
+						s = s[:i]
+						m = s
+			if carp: warn("Proxy failed connection to {}: {}".format(URL,m))
+			if retries == 0:
+				return "giveup"
+			else:
+				r='retries={}'.format(retries-1)
+				if carp: warn(r)
+				return r
+		else:
+			return "raise"
+
 	elif isinstance(e, requests.ConnectionError):
 		if   "Read timed out" in str(e) or "Connection to " in str(e) and " timed out" in str(e):
 			if carp: warn ("timed out while connecting to {}".format(URL))
