@@ -1169,6 +1169,8 @@ def handle_requests_error(e, URL, retries=3, othercontext=None):
 			if carp: warn("Proxy connection to {} failed: {}".format(URL,m))
 		elif "ProxyError('Cannot connect to proxy.', RemoteDisconnected('Remote end closed connection without response'))" in str(e):
 			if carp: warn("Proxy connection to {} failed: Remote end closed connection without response".format(URL))
+		elif "SSL: UNEXPECTED_EOF_WHILE_READING" in str(e):
+			if carp: warn("Connection to {} failed: SSL: UNEXPECTED_EOF_WHILE_READING".format(URL))
 		else:
 			if carp: warn('''Unrecognized ConnectionError on {URL}: {e}'''.format(URL=URL, e=e))
 			retries = 0
