@@ -2045,6 +2045,11 @@ def checkpodcast(podshow):
 				markdownloaded(podshow, ep)
 				continue
 
+			if ep.url == '':
+				# treating as error, not marking as downloaded
+				warn("Enclosure URL for {} is empty string.".format(ep.title))
+				continue
+
 			debug("Downloading new episode, {}".format(ep.pubdate), l=1)
 			podfile = ep.makefile()
 			NEWFILE=podfile.download(OUTPUTDIR)
