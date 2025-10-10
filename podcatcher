@@ -90,9 +90,9 @@ CATCHUP=False
 PARANUM=1
 RTIMEOUTS=(60,60)
 VERIFY=True
-UA = "{}/{}".format(ME,VER)
+#UA = "{}/{}".format(ME,VER)
 #UA = "Mozilla/5.0 (Android 10; Mobile; rv:136.0) Gecko/20100101 Firefox/136.0"
-#UA = "PodcastAddict/v5 (+https://podcastaddict.com/; Android podcast app)"
+UA = "PodcastAddict/v5 (+https://podcastaddict.com/; Android podcast app)"
 #UA = "okhttp/4.12.0" # seems to be what podcast addict uses if the first request didn't work
 
 
