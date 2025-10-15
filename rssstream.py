@@ -259,6 +259,7 @@ class RssParseException (Exception):
 
 if __name__ == "__main__":
 	from sys import argv
+	#import pprint
 	bbc = 'http://feeds.bbci.co.uk/news/world/rss.xml'
 
 	verb=True
@@ -269,18 +270,20 @@ if __name__ == "__main__":
 		feed = bbc
 
 	#fmt = "{pubDate[content]}\t{title[content]}\t{description[content]}"
-	fmt = "{guid[content]}\t{pubDate[content]}\t{title[content]}\t{description[content]}"
+	fmt = "{guid[content]}\t{pubDate[content]}\t{title[content]}\t{description[content]}\t{enclosure[attributes][url]}"
 
 	if verb:
 		print(feed)
 		print("Builtin requests")
 	#for i in RssStreamParser(feed,verb=verb).parseItems():
 	for i in oldest2newest(RssStreamParser(feed,verb=verb,ua="Me!",raize=True)):
-		#print(i)
 		#print(type(i['pubDate']['content']))
 		if not "description" in i:
 			if "itunes:summary" in i:
 				i["description"] = i["itunes:summary"]
+			else:
+				i["description"] = {"content": "", "attributes": {}}
+		#pprint.pp(i)
 		print(fmt.format(**i))
 	#print("External requests")
 	#resp = requests.get(feed)
