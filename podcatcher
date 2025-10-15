@@ -1678,6 +1678,12 @@ class podcast_file(object):
 		if NOTHE:
 			DIR=re.sub(r'^[tT]he ', '', DIR)
 
+		# check to see if the URL is urlencoded
+		tmpurl = urldecode(self.podcast_episode.url)
+		if tmpurl != self.podcast_episode.url:
+			warn("{} required URL decoding to {}".format(self.podcast_episode.url,tmpurl))
+			self.podcast_episode.url = tmpurl
+
 		debug("downloading {} into {}/{}".format(self.podcast_episode.url,DIR,self.name))
 		# by repeating the request this time allowing redirects, we ensure that all the 302,303,301,307 differences are handled, EXCEPT that we can't handle a 301 which expect us to record the updated URL into the ID3 info, because this code needs to be restructured, and honestly it doesn't make any sense to do so in the ckntext of a file download.
 		MSG="error downloading {} (downloadepisode); ".format(self.podcast_episode.url);
