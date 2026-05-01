@@ -351,8 +351,16 @@ def is_redirect(r):
 		return True
 	return False
 
+def validate_url(URL):
+	if ' ' in URL:
+		warn("URL {URL} contains spaces; encoding them".format(URL=URL))
+		URL = URL.replace(' ', '%20')
+	return URL
+
 def curl(URL,TMPFILE=None,allow_redirects=True):
 	barrier.wait()
+
+	URL=validate_url(URL)
 
 	# silent
 	# compressed
@@ -373,6 +381,7 @@ def curl(URL,TMPFILE=None,allow_redirects=True):
 		debug("curl got {} redirect for {}, but told not to follow redirect to {}".format(r.status_code, URL, r.headers['location']))
 		return r
 
+	debug("r says {}".format(r),l=1)
 	r.raise_for_status()
 
 	if TMPFILE is not None:
@@ -599,7 +608,7 @@ def url2filename (podep, preredirname=None):
 	if re.search(r'^[0-9abcdef-]*$',f):
 		debug('''File name "{}" is stupid hash/uuid, using {} instead'''.format(fil, new))
 		fil = new
-	elif re.search(r'^media\.mp3$',fil) or re.search(r'^audio\.mp3$',fil) or re.search(r'^default_tc\.mp3$',fil) or re.search(r'^default\.mp3',fil) or re.search(r'^published\.mp3$',fil) or re.search(r'^stream\.mp3$',fil):
+	elif re.search(r'^media\.mp3$',fil) or re.search(r'^audio\.mp3$',fil) or re.search(r'default_tc\.mp3$',fil) or re.search(r'^default\.mp3',fil) or re.search(r'^published\.mp3$',fil) or re.search(r'^stream\.mp3$',fil):
 		debug('''File name "{}" is generic, using {} instead'''.format(fil, new))
 		fil = new
 	elif re.search(r'^original$', fil):
@@ -994,7 +1003,7 @@ File {} can't be parsed by eyeD3
 		if imgurl is not None:
 			try:
 				content, content_type = geturlimg(imgurl)
-			except requests.exceptions.MissingSchema as e:
+			except (requests.exceptions.MissingSchema, requests.exceptions.HTTPError) as e:
 				warn("Error downloading rss feed img url {}: {}".format(imgurl, e))
 				content = None
 			if content:
@@ -1632,7 +1641,7 @@ class podcast_episode(object):
 		try:
 			r = curl(self.url, allow_redirects=False)
 		except Exception as e:
-			debug("exception resolving {}, handling".format(self.url))
+			debug("exception resolving {}, handling".format(e))
 			outcome = handle_requests_error(e,self.url)
 			if "retries=" in outcome or outcome == "giveup":
 				return None
