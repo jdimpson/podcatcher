@@ -91,16 +91,19 @@ PARANUM=1
 RTIMEOUTS=(60,60)
 VERIFY=True
 #UA = "{}/{}".format(ME,VER)
-#UA = "Mozilla/5.0 (Android 10; Mobile; rv:136.0) Gecko/20100101 Firefox/136.0"
-#UA = "PodcastAddict/v5 (+https://podcastaddict.com/; Android podcast app)"
-#UA = "okhttp/4.12.0" # seems to be what podcast addict uses if the first request didn't work
-UA = "Wget/1.21.3"
-#UA = "curl/7.88.1"
+
+UA = [
+	"Wget/1.21.3",
+	"Mozilla/5.0 (Android 10; Mobile; rv:136.0) Gecko/20100101 Firefox/136.0",
+	"okhttp/4.12.0", # seems to be what podcast addict uses if the first request didn't work
+	"PodcastAddict/v5 (+https://podcastaddict.com/; Android podcast app)",
+	"curl/7.88.1"
+]
 
 
 # TODO: get these from database?
 DEFAULT_HEADERS = {
-	'User-Agent': UA, 
+	'User-Agent': UA[0], 
 	'Accept': "*/*",
 	'Accept-Encoding': "gzip, deflate",
 	'Dnt': "1",
@@ -359,7 +362,7 @@ def validate_url(URL):
 		URL = URL.replace(' ', '%20')
 	return URL
 
-def curl(URL,TMPFILE=None,allow_redirects=True):
+def curl(URL,TMPFILE=None,allow_redirects=True, hd=None):
 	barrier.wait()
 
 	URL=validate_url(URL)
@@ -369,9 +372,10 @@ def curl(URL,TMPFILE=None,allow_redirects=True):
 	# globoff
 	# location
 
-	hd = { 
-		**DEFAULT_HEADERS
-	}
+	if hd is None:
+		hd = { 
+			**DEFAULT_HEADERS
+		}
 
 	debug("headers: {}".format(hd), l=1)
 
@@ -1895,30 +1899,39 @@ def checkpodcast(podshow):
 	carp = False
 	keeptrying = True
 	retries = 3
+	uacnt = 0
 	while keeptrying:
+		DEFAULT_HEADERS['User-Agent'] = UA[uacnt]
+		warn(DEFAULT_HEADERS['User-Agent'])
 		try:
 			resp = curl(podshow.url, allow_redirects=True)
 			keeptrying = False
 		except Exception as e:
-			keeptrying = False
 			podshow.mark_attempt(success=False)
 			carp = podshow.carp()
 			st = "{} failed attempts: {}".format(podshow.url, podshow.failedattempts())
 			if carp: warn(st)
 			else: debug(st)
-			outcome = handle_requests_error(e,podshow.url,retries=retries,othercontext=podshow)
-			if "retries=" in outcome:
+			if uacnt < len(UA) - 1:
+				# try again with next UA
+				uacnt+=1
 				keeptrying = True
-				retries-=1
-				if carp or DEBUG: warn("Retrying")
-			elif outcome == "giveup":
-				if carp or DEBUG: warn("Giving up")
-				return
-			elif outcome == "proceed":
-				#pass
-				return # need a response object in order to pass
-			elif outcome == "raise":
-				raise e
+				if carp or DEBUG: warn("Retrying with next user agent")
+			else:
+				keeptrying = False
+				outcome = handle_requests_error(e,podshow.url,retries=retries,othercontext=podshow)
+				if "retries=" in outcome:
+					keeptrying = True
+					retries-=1
+					if carp or DEBUG: warn("Retrying")
+				elif outcome == "giveup":
+					if carp or DEBUG: warn("Giving up")
+					return
+				elif outcome == "proceed":
+					#pass
+					return # need a response object in order to pass
+				elif outcome == "raise":
+					raise e
 
 	# oldest to newest
 	last_code = 0
